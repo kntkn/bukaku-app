@@ -8,8 +8,24 @@ const cors = require('cors');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const { v4: uuidv4 } = require('uuid');
+const multer = require('multer');
+const pdfParse = require('pdf-parse');
+const Anthropic = require('@anthropic-ai/sdk');
 
 const app = express();
+
+// ファイルアップロード設定（メモリストレージ）
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB制限
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'application/pdf') {
+      cb(null, true);
+    } else {
+      cb(new Error('PDFファイルのみアップロード可能です'));
+    }
+  }
+});
 const PORT = process.env.PORT || 3001;
 
 // HTTPサーバーを作成（WebSocketと共有）
@@ -313,6 +329,96 @@ app.get('/api/platforms', (req, res) => {
       { id: 'ierabu', name: 'いえらぶ', status: 'planned' }
     ]
   });
+});
+
+/**
+ * PDFマイソク解析エンドポイント
+ */
+app.post('/api/maisoku/parse', upload.single('pdf'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: 'PDFファイルが必要です'
+      });
+    }
+
+    console.log('[マイソク解析] ファイル受信:', req.file.originalname);
+
+    // PDFからテキストを抽出
+    const pdfData = await pdfParse(req.file.buffer);
+    const extractedText = pdfData.text;
+
+    console.log('[マイソク解析] テキスト抽出完了, 文字数:', extractedText.length);
+
+    // Claude APIでマイソクを解析
+    const anthropic = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY
+    });
+
+    const prompt = `以下は不動産のマイソク（物件資料）から抽出したテキストです。この情報から物件情報を構造化して抽出してください。
+
+抽出するフィールド:
+- property_name: 物件名（建物名）
+- address: 住所
+- rent: 賃料
+- management_fee: 管理費・共益費
+- deposit: 敷金
+- key_money: 礼金
+- floor_plan: 間取り
+- area: 専有面積
+- building_type: 構造（RC、鉄骨など）
+- floors: 階数
+- built_year: 築年月
+- management_company: 管理会社名
+- contact_phone: 連絡先電話番号
+
+JSONフォーマットで出力してください。不明な項目はnullとしてください。
+
+マイソクテキスト:
+${extractedText.substring(0, 8000)}`;
+
+    const message = await anthropic.messages.create({
+      model: 'claude-3-5-sonnet-20241022',
+      max_tokens: 1024,
+      messages: [
+        { role: 'user', content: prompt }
+      ]
+    });
+
+    // レスポンスからJSONを抽出
+    const responseText = message.content[0].text;
+    let parsedData;
+
+    try {
+      // JSON部分を抽出（```json ... ``` または直接のJSON）
+      const jsonMatch = responseText.match(/```json\n?([\s\S]*?)\n?```/) ||
+        responseText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        parsedData = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+      } else {
+        throw new Error('JSON形式のレスポンスが見つかりません');
+      }
+    } catch (e) {
+      console.error('[マイソク解析] JSON解析エラー:', e);
+      parsedData = { raw_response: responseText };
+    }
+
+    console.log('[マイソク解析] 解析完了:', parsedData.property_name || '物件名不明');
+
+    res.json({
+      success: true,
+      data: parsedData,
+      raw_text_length: extractedText.length
+    });
+
+  } catch (error) {
+    console.error('[マイソク解析] エラー:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 
 // サーバー起動

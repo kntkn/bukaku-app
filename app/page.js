@@ -18,6 +18,12 @@ export default function Home() {
   const [statusMessage, setStatusMessage] = useState('');
   const wsRef = useRef(null);
 
+  // マイソク解析用のstate
+  const [pdfFile, setPdfFile] = useState(null);
+  const [isParsing, setIsParsing] = useState(false);
+  const [parsedData, setParsedData] = useState(null);
+  const fileInputRef = useRef(null);
+
   // クリーンアップ
   useEffect(() => {
     return () => {
@@ -26,6 +32,44 @@ export default function Home() {
       }
     };
   }, []);
+
+  // マイソクPDF解析
+  const handlePdfParse = async () => {
+    if (!pdfFile) {
+      setError('PDFファイルを選択してください');
+      return;
+    }
+
+    setIsParsing(true);
+    setError(null);
+    setParsedData(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('pdf', pdfFile);
+
+      const response = await fetch(`${BACKEND_URL}/api/maisoku/parse`, {
+        method: 'POST',
+        body: formData
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        setParsedData(data.data);
+        // 物件名が取得できたら自動入力
+        if (data.data.property_name) {
+          setPropertyName(data.data.property_name);
+        }
+      } else {
+        setError(data.error || 'マイソク解析に失敗しました');
+      }
+    } catch (err) {
+      setError('通信エラーが発生しました');
+    } finally {
+      setIsParsing(false);
+    }
+  };
 
   const handleBukaku = async () => {
     if (!propertyName.trim()) {
@@ -139,6 +183,86 @@ export default function Home() {
       </header>
 
       <main style={styles.main}>
+        {/* マイソク解析セクション */}
+        <section style={styles.section}>
+          <h2 style={styles.sectionTitle}>マイソク解析</h2>
+          <p style={styles.description}>
+            マイソク（物件資料PDF）をアップロードすると、AIが物件情報を自動抽出します
+          </p>
+
+          <div style={styles.uploadArea}>
+            <input
+              type="file"
+              accept="application/pdf"
+              onChange={(e) => setPdfFile(e.target.files[0])}
+              ref={fileInputRef}
+              style={{ display: 'none' }}
+            />
+            <div
+              onClick={() => fileInputRef.current?.click()}
+              style={styles.dropZone}
+            >
+              {pdfFile ? (
+                <p>{pdfFile.name}</p>
+              ) : (
+                <p>クリックしてPDFを選択</p>
+              )}
+            </div>
+          </div>
+
+          <button
+            onClick={handlePdfParse}
+            disabled={isParsing || !pdfFile}
+            style={{
+              ...styles.button,
+              backgroundColor: '#3b82f6',
+              opacity: (isParsing || !pdfFile) ? 0.6 : 1,
+              cursor: (isParsing || !pdfFile) ? 'not-allowed' : 'pointer'
+            }}
+          >
+            {isParsing ? '解析中...' : 'マイソクを解析'}
+          </button>
+
+          {/* 解析結果表示 */}
+          {parsedData && (
+            <div style={styles.parsedDataBox}>
+              <h3 style={{ fontSize: 16, marginBottom: 12 }}>抽出された物件情報</h3>
+              <div style={styles.parsedGrid}>
+                {parsedData.property_name && (
+                  <div style={styles.parsedItem}>
+                    <span style={styles.parsedLabel}>物件名</span>
+                    <span style={styles.parsedValue}>{parsedData.property_name}</span>
+                  </div>
+                )}
+                {parsedData.address && (
+                  <div style={styles.parsedItem}>
+                    <span style={styles.parsedLabel}>住所</span>
+                    <span style={styles.parsedValue}>{parsedData.address}</span>
+                  </div>
+                )}
+                {parsedData.rent && (
+                  <div style={styles.parsedItem}>
+                    <span style={styles.parsedLabel}>賃料</span>
+                    <span style={styles.parsedValue}>{parsedData.rent}</span>
+                  </div>
+                )}
+                {parsedData.floor_plan && (
+                  <div style={styles.parsedItem}>
+                    <span style={styles.parsedLabel}>間取り</span>
+                    <span style={styles.parsedValue}>{parsedData.floor_plan}</span>
+                  </div>
+                )}
+                {parsedData.management_company && (
+                  <div style={styles.parsedItem}>
+                    <span style={styles.parsedLabel}>管理会社</span>
+                    <span style={styles.parsedValue}>{parsedData.management_company}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </section>
+
         {/* 検索フォーム */}
         <section style={styles.section}>
           <h2 style={styles.sectionTitle}>物件検索</h2>
@@ -338,6 +462,11 @@ const styles = {
     fontSize: '18px',
     fontWeight: '600'
   },
+  description: {
+    color: '#6b7280',
+    fontSize: '14px',
+    marginBottom: '16px'
+  },
   inputGroup: {
     marginBottom: '16px'
   },
@@ -381,6 +510,43 @@ const styles = {
     borderRadius: '6px',
     marginBottom: '24px',
     border: '1px solid #fecaca'
+  },
+  // マイソク解析用スタイル
+  uploadArea: {
+    marginBottom: '16px'
+  },
+  dropZone: {
+    border: '2px dashed #d1d5db',
+    borderRadius: '8px',
+    padding: '32px',
+    textAlign: 'center',
+    cursor: 'pointer',
+    backgroundColor: '#fafafa',
+    color: '#6b7280'
+  },
+  parsedDataBox: {
+    marginTop: '16px',
+    padding: '16px',
+    backgroundColor: '#f0fdf4',
+    borderRadius: '8px',
+    border: '1px solid #86efac'
+  },
+  parsedGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, 1fr)',
+    gap: '12px'
+  },
+  parsedItem: {
+    display: 'flex',
+    flexDirection: 'column'
+  },
+  parsedLabel: {
+    fontSize: '12px',
+    color: '#6b7280'
+  },
+  parsedValue: {
+    fontSize: '14px',
+    fontWeight: '500'
   },
   // リアルタイムプレビュー用スタイル
   statusBar: {

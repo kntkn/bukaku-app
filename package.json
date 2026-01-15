@@ -17,9 +17,12 @@
   "author": "honda",
   "license": "ISC",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.2",
     "cors": "^2.8.5",
     "express": "^5.2.1",
+    "multer": "^2.0.2",
     "next": "^16.1.2",
+    "pdf-parse": "^2.4.5",
     "playwright": "^1.57.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
