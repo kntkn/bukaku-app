@@ -6,12 +6,19 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "server": "node server/index.js",
     "bukaku": "node src/itandi-bukaku.js"
   },
-  "keywords": ["bukaku", "real-estate", "automation"],
+  "keywords": [
+    "bukaku",
+    "real-estate",
+    "automation"
+  ],
   "author": "honda",
   "license": "ISC",
   "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.2.1",
     "next": "^16.1.2",
     "playwright": "^1.57.0",
     "react": "^19.2.3",

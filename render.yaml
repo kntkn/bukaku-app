@@ -1,0 +1,13 @@
+# Render設定
+services:
+  - type: web
+    name: bukaku-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: ITANDI_EMAIL
+        sync: false
+      - key: ITANDI_PASSWORD
+        sync: false
+    healthCheckPath: /health
+    plan: free
