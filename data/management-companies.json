@@ -1,0 +1,29 @@
+{
+  "companies": [
+    {
+      "name": "東急住宅リース",
+      "platforms": ["itandi"],
+      "aliases": ["東急リース", "TOKYU"],
+      "notes": ""
+    },
+    {
+      "name": "アパマンショップ",
+      "platforms": ["itandi", "ierabu"],
+      "aliases": ["apaman"],
+      "notes": ""
+    },
+    {
+      "name": "大東建託パートナーズ",
+      "platforms": ["ierabu"],
+      "aliases": ["大東建託", "DK SELECT"],
+      "notes": ""
+    },
+    {
+      "name": "レオパレス21",
+      "platforms": [],
+      "aliases": ["レオパレス"],
+      "notes": "自社サイトのみ"
+    }
+  ],
+  "updatedAt": "2025-01-15T00:00:00Z"
+}

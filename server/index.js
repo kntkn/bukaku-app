@@ -579,6 +579,178 @@ app.post('/api/notion/setup', async (req, res) => {
   }
 });
 
+/**
+ * 管理会社DB - 一覧取得
+ */
+app.get('/api/companies', (req, res) => {
+  const fs = require('fs');
+  const path = require('path');
+
+  try {
+    const dataPath = path.join(__dirname, '../data/management-companies.json');
+    const data = JSON.parse(fs.readFileSync(dataPath, 'utf-8'));
+
+    res.json({
+      success: true,
+      companies: data.companies,
+      updatedAt: data.updatedAt
+    });
+  } catch (error) {
+    console.error('[管理会社DB] エラー:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * 管理会社DB - 検索（名前またはエイリアスで検索）
+ */
+app.get('/api/companies/search', (req, res) => {
+  const fs = require('fs');
+  const path = require('path');
+  const { q } = req.query;
+
+  if (!q) {
+    return res.status(400).json({
+      success: false,
+      error: '検索クエリが必要です'
+    });
+  }
+
+  try {
+    const dataPath = path.join(__dirname, '../data/management-companies.json');
+    const data = JSON.parse(fs.readFileSync(dataPath, 'utf-8'));
+
+    const query = q.toLowerCase();
+    const matches = data.companies.filter(company => {
+      // 名前で検索
+      if (company.name.toLowerCase().includes(query)) {
+        return true;
+      }
+      // エイリアスで検索
+      if (company.aliases.some(alias => alias.toLowerCase().includes(query))) {
+        return true;
+      }
+      return false;
+    });
+
+    res.json({
+      success: true,
+      query: q,
+      results: matches
+    });
+  } catch (error) {
+    console.error('[管理会社DB] 検索エラー:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * 管理会社DB - 追加/更新
+ */
+app.post('/api/companies', (req, res) => {
+  const fs = require('fs');
+  const path = require('path');
+  const { name, platforms, aliases = [], notes = '' } = req.body;
+
+  if (!name || !platforms) {
+    return res.status(400).json({
+      success: false,
+      error: '名前とプラットフォームが必要です'
+    });
+  }
+
+  try {
+    const dataPath = path.join(__dirname, '../data/management-companies.json');
+    const data = JSON.parse(fs.readFileSync(dataPath, 'utf-8'));
+
+    // 既存の会社を検索
+    const existingIndex = data.companies.findIndex(c =>
+      c.name.toLowerCase() === name.toLowerCase()
+    );
+
+    const companyData = {
+      name,
+      platforms,
+      aliases,
+      notes
+    };
+
+    if (existingIndex >= 0) {
+      // 更新
+      data.companies[existingIndex] = companyData;
+      console.log('[管理会社DB] 更新:', name);
+    } else {
+      // 新規追加
+      data.companies.push(companyData);
+      console.log('[管理会社DB] 追加:', name);
+    }
+
+    data.updatedAt = new Date().toISOString();
+
+    fs.writeFileSync(dataPath, JSON.stringify(data, null, 2));
+
+    res.json({
+      success: true,
+      company: companyData,
+      action: existingIndex >= 0 ? 'updated' : 'created'
+    });
+  } catch (error) {
+    console.error('[管理会社DB] 保存エラー:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * 管理会社DB - 削除
+ */
+app.delete('/api/companies/:name', (req, res) => {
+  const fs = require('fs');
+  const path = require('path');
+  const { name } = req.params;
+
+  try {
+    const dataPath = path.join(__dirname, '../data/management-companies.json');
+    const data = JSON.parse(fs.readFileSync(dataPath, 'utf-8'));
+
+    const initialLength = data.companies.length;
+    data.companies = data.companies.filter(c =>
+      c.name.toLowerCase() !== name.toLowerCase()
+    );
+
+    if (data.companies.length === initialLength) {
+      return res.status(404).json({
+        success: false,
+        error: '管理会社が見つかりません'
+      });
+    }
+
+    data.updatedAt = new Date().toISOString();
+    fs.writeFileSync(dataPath, JSON.stringify(data, null, 2));
+
+    console.log('[管理会社DB] 削除:', name);
+
+    res.json({
+      success: true,
+      message: `${name}を削除しました`
+    });
+  } catch (error) {
+    console.error('[管理会社DB] 削除エラー:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // サーバー起動
 server.listen(PORT, () => {
   console.log(`物確バックエンドサーバー起動: http://localhost:${PORT}`);
