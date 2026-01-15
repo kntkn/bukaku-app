@@ -1,0 +1,21 @@
+{
+  "name": "bukaku-app",
+  "version": "1.0.0",
+  "description": "物確自動化Webアプリ",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "bukaku": "node src/itandi-bukaku.js"
+  },
+  "keywords": ["bukaku", "real-estate", "automation"],
+  "author": "honda",
+  "license": "ISC",
+  "dependencies": {
+    "next": "^16.1.2",
+    "playwright": "^1.57.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "yaml": "^2.8.2"
+  }
+}

@@ -1,0 +1,113 @@
+# ITANDI BB 物確スキル定義
+# 検証日: 2025-01-15
+
+name: itandi
+display_name: ITANDI BB
+base_url: https://itandibb.com
+
+# ログイン設定
+login:
+  url: https://itandi-accounts.com/login?client_id=itandi_bb&redirect_uri=https%3A%2F%2Fitandibb.com%2Fitandi_accounts_callback&response_type=code&state=d154b03411a94f026786ebb7ab9277ff252cbe88572cbb02261df041314b89d0
+  # 注意: 2回ログイン試行が必要
+  retry_count: 2
+  selectors:
+    email_input: 'input#email'
+    password_input: 'input#password'
+    submit_button: 'input[type="submit"]'
+  success_indicator:
+    url_contains: "itandibb.com/top"
+
+# 検索ページへの遷移
+navigation:
+  # HOMEから検索ページへ
+  from_home:
+    click: 'text=リスト検索'
+    # 最初の「リスト検索」（賃貸・居住用）をクリック
+    index: 0
+  search_page_url: https://itandibb.com/rent_rooms/list
+
+# 物件検索設定
+search:
+  # 検索フォーム
+  form:
+    building_name:
+      selector: 'input[name="building_name:match"]'
+      label: '物件名（カナ検索可）'
+    room_number:
+      selector: 'input[name="room_number:match"]'
+      label: '部屋番号'
+    management_company:
+      selector: 'input#selectManagementCompanies'
+      label: '管理会社'
+    rent_min:
+      selector: 'input[name="rent:gteq"]'
+      label: '賃料下限'
+    rent_max:
+      selector: 'input[name="rent:lteq"]'
+      label: '賃料上限'
+
+  # 所在地絞り込み（モーダル）
+  location_filter:
+    open_button: 'button:has-text("所在地で絞り込み")'
+    prefecture_selector: 'text=${prefecture}'  # 例: text=東京都
+    city_selector: 'text=${city}'              # 例: text=渋谷区
+    confirm_button: 'button:has-text("確定")'
+
+  # 検索実行
+  submit_button: 'button[type="submit"]'
+  # 注意: 所在地など何か条件を入力しないと検索ボタンがdisabled
+
+# 検索結果設定
+result:
+  # 物件カード
+  property_card:
+    selector: '.itandi-bb-ui__Box.css-1tqsbsd'
+    # 注意: CSSクラスは変更される可能性あり
+
+  # カード内の情報
+  fields:
+    # 募集状況
+    recruitment_status:
+      selector: 'text=募集中'
+      parent_class: 'itandi-bb-ui__Flex'
+
+    # 広告費（AD）
+    ad_info:
+      selector: 'text=広告'
+      # 「広告費」の有無を確認
+
+    # 内見
+    viewing_info:
+      selector: 'text=内見'
+
+    # 即入居
+    immediate_move_in:
+      selector: 'text=即入居'
+
+  # 1ページあたりの表示件数
+  items_per_page: 20
+
+  # ステータスマッピング
+  status_mapping:
+    "募集中": "available"
+    "申込あり": "applied"
+    "商談中": "negotiating"
+    "成約済": "contracted"
+
+# 物確結果の判定
+bukaku_result:
+  # 空室確認OK
+  available:
+    - "募集中"
+    - "即入居"
+
+  # 要電話確認
+  needs_call:
+    - "申込あり"
+    - "商談中"
+    - "物確表示"  # 詳細確認が必要
+
+  # 募集終了
+  unavailable:
+    - "成約済"
+    - "募集終了"
