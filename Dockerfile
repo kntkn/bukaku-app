@@ -6,13 +6,14 @@ WORKDIR /app
 # package.jsonとpackage-lock.jsonをコピー
 COPY package*.json ./
 
-# 依存関係をインストール
-RUN npm ci --omit=dev
+# 依存関係をインストール（キャッシュクリア）
+RUN npm cache clean --force && npm install
 
 # ソースコードをコピー
 COPY server/ ./server/
 COPY src/ ./src/
 COPY skills/ ./skills/
+COPY data/ ./data/
 
 # ポート設定
 ENV PORT=3001
