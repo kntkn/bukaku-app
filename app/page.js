@@ -1,6 +1,10 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
+
+// バックエンドURL
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'https://bukaku-backend.onrender.com';
+const WS_URL = BACKEND_URL.replace('https://', 'wss://').replace('http://', 'ws://');
 
 export default function Home() {
   const [propertyName, setPropertyName] = useState('');
@@ -8,6 +12,20 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
+
+  // リアルタイムプレビュー用のstate
+  const [screenshot, setScreenshot] = useState(null);
+  const [statusMessage, setStatusMessage] = useState('');
+  const wsRef = useRef(null);
+
+  // クリーンアップ
+  useEffect(() => {
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+    };
+  }, []);
 
   const handleBukaku = async () => {
     if (!propertyName.trim()) {
@@ -18,29 +36,99 @@ export default function Home() {
     setIsLoading(true);
     setError(null);
     setResults(null);
+    setScreenshot(null);
+    setStatusMessage('セッションを開始中...');
 
     try {
-      const response = await fetch('/api/bukaku', {
+      // 1. セッションを開始
+      const startResponse = await fetch(`${BACKEND_URL}/api/bukaku/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           propertyName: propertyName.trim(),
-          checkAD
+          checkAD,
+          platform: 'itandi'
         })
       });
 
-      const data = await response.json();
+      const startData = await startResponse.json();
 
-      if (data.success) {
-        setResults(data);
-      } else {
-        setError(data.error || data.message || '物確に失敗しました');
+      if (!startData.success) {
+        throw new Error(startData.error || 'セッション開始に失敗しました');
       }
+
+      const { sessionId } = startData;
+      setStatusMessage('WebSocket接続中...');
+
+      // 2. WebSocket接続
+      const ws = new WebSocket(WS_URL);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setStatusMessage('物確を開始しています...');
+        // 物確開始メッセージを送信
+        ws.send(JSON.stringify({
+          type: 'start_bukaku',
+          sessionId
+        }));
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        switch (data.type) {
+          case 'status':
+            setStatusMessage(data.message);
+            break;
+
+          case 'screenshot':
+            setScreenshot(data.image);
+            break;
+
+          case 'result':
+            if (data.success) {
+              setResults(data);
+            } else {
+              setError(data.error || '物確に失敗しました');
+            }
+            setIsLoading(false);
+            setStatusMessage('');
+            ws.close();
+            break;
+
+          case 'error':
+            setError(data.message);
+            setIsLoading(false);
+            setStatusMessage('');
+            ws.close();
+            break;
+        }
+      };
+
+      ws.onerror = () => {
+        setError('WebSocket接続エラーが発生しました');
+        setIsLoading(false);
+        setStatusMessage('');
+      };
+
+      ws.onclose = () => {
+        wsRef.current = null;
+      };
+
     } catch (err) {
-      setError('通信エラーが発生しました');
-    } finally {
+      setError(err.message || '通信エラーが発生しました');
       setIsLoading(false);
+      setStatusMessage('');
     }
+  };
+
+  const handleCancel = () => {
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+    setIsLoading(false);
+    setStatusMessage('');
+    setScreenshot(null);
   };
 
   return (
@@ -79,18 +167,53 @@ export default function Home() {
             </label>
           </div>
 
-          <button
-            onClick={handleBukaku}
-            disabled={isLoading}
-            style={{
-              ...styles.button,
-              opacity: isLoading ? 0.6 : 1,
-              cursor: isLoading ? 'not-allowed' : 'pointer'
-            }}
-          >
-            {isLoading ? '物確中...' : '物確開始'}
-          </button>
+          {isLoading ? (
+            <button
+              onClick={handleCancel}
+              style={{
+                ...styles.button,
+                backgroundColor: '#6b7280'
+              }}
+            >
+              キャンセル
+            </button>
+          ) : (
+            <button
+              onClick={handleBukaku}
+              style={styles.button}
+            >
+              物確開始
+            </button>
+          )}
         </section>
+
+        {/* リアルタイムプレビュー */}
+        {isLoading && (
+          <section style={styles.section}>
+            <h2 style={styles.sectionTitle}>実行状況</h2>
+
+            {/* ステータスメッセージ */}
+            <div style={styles.statusBar}>
+              <div style={styles.spinner}></div>
+              <span>{statusMessage}</span>
+            </div>
+
+            {/* スクリーンショットプレビュー */}
+            <div style={styles.previewContainer}>
+              {screenshot ? (
+                <img
+                  src={screenshot}
+                  alt="実行中の画面"
+                  style={styles.previewImage}
+                />
+              ) : (
+                <div style={styles.previewPlaceholder}>
+                  <p>ブラウザを起動中...</p>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
 
         {/* エラー表示 */}
         {error && (
@@ -113,42 +236,46 @@ export default function Home() {
               </span>
             </div>
 
-            {results.results.map((result, index) => (
-              <div key={index} style={styles.resultCard}>
-                <div style={styles.resultHeader}>
-                  <span style={{
-                    ...styles.statusBadge,
-                    backgroundColor: result.status === 'available' ? '#10b981' :
-                      result.status === 'applied' ? '#f59e0b' : '#ef4444'
-                  }}>
-                    {result.status === 'available' ? '募集中' :
-                      result.status === 'applied' ? '申込あり' : '確認不可'}
-                  </span>
-                </div>
-
-                <div style={styles.resultDetails}>
-                  <div style={styles.detailItem}>
-                    <span style={styles.detailLabel}>AD</span>
-                    <span style={styles.detailValue}>
-                      {result.has_ad ? '✓ あり' : '－ なし'}
+            {results.results.length === 0 ? (
+              <p style={{ color: '#6b7280' }}>該当する物件が見つかりませんでした</p>
+            ) : (
+              results.results.map((result, index) => (
+                <div key={index} style={styles.resultCard}>
+                  <div style={styles.resultHeader}>
+                    <span style={{
+                      ...styles.statusBadge,
+                      backgroundColor: result.status === 'available' ? '#10b981' :
+                        result.status === 'applied' ? '#f59e0b' : '#ef4444'
+                    }}>
+                      {result.status === 'available' ? '募集中' :
+                        result.status === 'applied' ? '申込あり' : '確認不可'}
                     </span>
                   </div>
-                  <div style={styles.detailItem}>
-                    <span style={styles.detailLabel}>内見</span>
-                    <span style={styles.detailValue}>
-                      {result.viewing_available ? '✓ 可' : '要確認'}
-                    </span>
-                  </div>
-                </div>
 
-                <details style={styles.rawText}>
-                  <summary>詳細情報</summary>
-                  <pre style={{ fontSize: 12, whiteSpace: 'pre-wrap' }}>
-                    {result.raw_text}
-                  </pre>
-                </details>
-              </div>
-            ))}
+                  <div style={styles.resultDetails}>
+                    <div style={styles.detailItem}>
+                      <span style={styles.detailLabel}>AD</span>
+                      <span style={styles.detailValue}>
+                        {result.has_ad ? '✓ あり' : '－ なし'}
+                      </span>
+                    </div>
+                    <div style={styles.detailItem}>
+                      <span style={styles.detailLabel}>内見</span>
+                      <span style={styles.detailValue}>
+                        {result.viewing_available ? '✓ 可' : '要確認'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <details style={styles.rawText}>
+                    <summary>詳細情報</summary>
+                    <pre style={{ fontSize: 12, whiteSpace: 'pre-wrap' }}>
+                      {result.raw_text}
+                    </pre>
+                  </details>
+                </div>
+              ))
+            )}
           </section>
         )}
       </main>
@@ -156,6 +283,14 @@ export default function Home() {
       <footer style={styles.footer}>
         <p>© 2025 物確アプリ</p>
       </footer>
+
+      {/* スピナーアニメーション用CSS */}
+      <style jsx global>{`
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+      `}</style>
     </div>
   );
 }
@@ -236,7 +371,8 @@ const styles = {
     border: 'none',
     borderRadius: '6px',
     fontSize: '16px',
-    fontWeight: '600'
+    fontWeight: '600',
+    cursor: 'pointer'
   },
   error: {
     backgroundColor: '#fef2f2',
@@ -245,6 +381,46 @@ const styles = {
     borderRadius: '6px',
     marginBottom: '24px',
     border: '1px solid #fecaca'
+  },
+  // リアルタイムプレビュー用スタイル
+  statusBar: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    marginBottom: '16px',
+    padding: '12px',
+    backgroundColor: '#f0f9ff',
+    borderRadius: '6px',
+    color: '#0369a1'
+  },
+  spinner: {
+    width: '20px',
+    height: '20px',
+    border: '3px solid #e0e0e0',
+    borderTopColor: '#0369a1',
+    borderRadius: '50%',
+    animation: 'spin 1s linear infinite'
+  },
+  previewContainer: {
+    border: '2px solid #e5e7eb',
+    borderRadius: '8px',
+    overflow: 'hidden',
+    backgroundColor: '#1f2937',
+    aspectRatio: '16/9'
+  },
+  previewImage: {
+    width: '100%',
+    height: '100%',
+    objectFit: 'contain'
+  },
+  previewPlaceholder: {
+    width: '100%',
+    height: '100%',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: '#9ca3af',
+    minHeight: '200px'
   },
   resultSummary: {
     display: 'flex',
