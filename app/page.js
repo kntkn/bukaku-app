@@ -24,6 +24,10 @@ export default function Home() {
   const [parsedData, setParsedData] = useState(null);
   const fileInputRef = useRef(null);
 
+  // Notion連携用のstate
+  const [isRecording, setIsRecording] = useState(false);
+  const [notionResult, setNotionResult] = useState(null);
+
   // クリーンアップ
   useEffect(() => {
     return () => {
@@ -173,6 +177,48 @@ export default function Home() {
     setIsLoading(false);
     setStatusMessage('');
     setScreenshot(null);
+  };
+
+  // Notionに記録
+  const handleNotionRecord = async () => {
+    if (!results) return;
+
+    setIsRecording(true);
+    setNotionResult(null);
+
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/notion/record`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          propertyName,
+          results: results.results,
+          platform: results.platform,
+          parsedData
+        })
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        setNotionResult({
+          success: true,
+          url: data.url
+        });
+      } else {
+        setNotionResult({
+          success: false,
+          error: data.error
+        });
+      }
+    } catch (err) {
+      setNotionResult({
+        success: false,
+        error: '通信エラーが発生しました'
+      });
+    } finally {
+      setIsRecording(false);
+    }
   };
 
   return (
@@ -400,6 +446,51 @@ export default function Home() {
                 </div>
               ))
             )}
+
+            {/* Notion記録ボタン */}
+            <div style={{ marginTop: '20px' }}>
+              <button
+                onClick={handleNotionRecord}
+                disabled={isRecording}
+                style={{
+                  ...styles.button,
+                  backgroundColor: '#10b981',
+                  opacity: isRecording ? 0.6 : 1,
+                  cursor: isRecording ? 'not-allowed' : 'pointer'
+                }}
+              >
+                {isRecording ? 'Notionに記録中...' : 'Notionに記録'}
+              </button>
+
+              {notionResult && (
+                <div style={{
+                  marginTop: '12px',
+                  padding: '12px',
+                  borderRadius: '6px',
+                  backgroundColor: notionResult.success ? '#f0fdf4' : '#fef2f2',
+                  color: notionResult.success ? '#166534' : '#dc2626',
+                  border: `1px solid ${notionResult.success ? '#86efac' : '#fecaca'}`
+                }}>
+                  {notionResult.success ? (
+                    <>
+                      Notionに記録しました
+                      {notionResult.url && (
+                        <a
+                          href={notionResult.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ marginLeft: '8px', color: '#0369a1' }}
+                        >
+                          開く
+                        </a>
+                      )}
+                    </>
+                  ) : (
+                    <>エラー: {notionResult.error}</>
+                  )}
+                </div>
+              )}
+            </div>
           </section>
         )}
       </main>

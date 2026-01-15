@@ -11,6 +11,7 @@ const { v4: uuidv4 } = require('uuid');
 const multer = require('multer');
 const pdfParse = require('pdf-parse');
 const Anthropic = require('@anthropic-ai/sdk');
+const { Client } = require('@notionhq/client');
 
 const app = express();
 
@@ -414,6 +415,163 @@ ${extractedText.substring(0, 8000)}`;
 
   } catch (error) {
     console.error('[マイソク解析] エラー:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Notion連携 - 物確結果を記録
+ */
+app.post('/api/notion/record', async (req, res) => {
+  try {
+    const { propertyName, results, platform, parsedData } = req.body;
+
+    if (!process.env.NOTION_TOKEN || !process.env.NOTION_DATABASE_ID) {
+      return res.status(400).json({
+        success: false,
+        error: 'Notion設定が必要です（NOTION_TOKEN, NOTION_DATABASE_ID）'
+      });
+    }
+
+    const notion = new Client({ auth: process.env.NOTION_TOKEN });
+    const databaseId = process.env.NOTION_DATABASE_ID;
+
+    console.log('[Notion] 物確結果を記録:', propertyName);
+
+    // 結果をまとめて1つのページとして記録
+    const properties = {
+      '物件名': {
+        title: [{ text: { content: propertyName || '不明' } }]
+      },
+      'プラットフォーム': {
+        select: { name: platform?.toUpperCase() || 'ITANDI' }
+      },
+      '確認日時': {
+        date: { start: new Date().toISOString() }
+      },
+      '結果件数': {
+        number: results?.length || 0
+      }
+    };
+
+    // 最初の結果からステータスを取得
+    if (results && results.length > 0) {
+      const firstResult = results[0];
+
+      properties['ステータス'] = {
+        select: {
+          name: firstResult.status === 'available' ? '募集中' :
+            firstResult.status === 'applied' ? '申込あり' : '確認不可'
+        }
+      };
+
+      properties['AD有り'] = {
+        checkbox: firstResult.has_ad || false
+      };
+
+      properties['内見可'] = {
+        checkbox: firstResult.viewing_available || false
+      };
+    }
+
+    // マイソクデータがあれば追加
+    if (parsedData) {
+      if (parsedData.address) {
+        properties['住所'] = {
+          rich_text: [{ text: { content: parsedData.address } }]
+        };
+      }
+      if (parsedData.rent) {
+        properties['賃料'] = {
+          rich_text: [{ text: { content: parsedData.rent } }]
+        };
+      }
+      if (parsedData.management_company) {
+        properties['管理会社'] = {
+          rich_text: [{ text: { content: parsedData.management_company } }]
+        };
+      }
+    }
+
+    const response = await notion.pages.create({
+      parent: { database_id: databaseId },
+      properties
+    });
+
+    console.log('[Notion] 記録完了:', response.id);
+
+    res.json({
+      success: true,
+      pageId: response.id,
+      url: response.url
+    });
+
+  } catch (error) {
+    console.error('[Notion] エラー:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Notionデータベース初期化（プロパティの設定）
+ */
+app.post('/api/notion/setup', async (req, res) => {
+  try {
+    if (!process.env.NOTION_TOKEN || !process.env.NOTION_DATABASE_ID) {
+      return res.status(400).json({
+        success: false,
+        error: 'Notion設定が必要です'
+      });
+    }
+
+    const notion = new Client({ auth: process.env.NOTION_TOKEN });
+    const databaseId = process.env.NOTION_DATABASE_ID;
+
+    // データベースのプロパティを更新
+    await notion.databases.update({
+      database_id: databaseId,
+      properties: {
+        '物件名': { title: {} },
+        'ステータス': {
+          select: {
+            options: [
+              { name: '募集中', color: 'green' },
+              { name: '申込あり', color: 'yellow' },
+              { name: '確認不可', color: 'red' }
+            ]
+          }
+        },
+        'プラットフォーム': {
+          select: {
+            options: [
+              { name: 'ITANDI', color: 'blue' },
+              { name: 'いえらぶ', color: 'purple' }
+            ]
+          }
+        },
+        'AD有り': { checkbox: {} },
+        '内見可': { checkbox: {} },
+        '確認日時': { date: {} },
+        '結果件数': { number: {} },
+        '住所': { rich_text: {} },
+        '賃料': { rich_text: {} },
+        '管理会社': { rich_text: {} }
+      }
+    });
+
+    res.json({
+      success: true,
+      message: 'データベースを設定しました'
+    });
+
+  } catch (error) {
+    console.error('[Notion Setup] エラー:', error);
     res.status(500).json({
       success: false,
       error: error.message
