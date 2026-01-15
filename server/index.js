@@ -9,8 +9,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const { v4: uuidv4 } = require('uuid');
 const multer = require('multer');
-const pdfParseModule = require('pdf-parse');
-const pdfParse = pdfParseModule.default || pdfParseModule;
+const pdfParse = require('pdf-parse');
 const Anthropic = require('@anthropic-ai/sdk');
 const { Client } = require('@notionhq/client');
 
