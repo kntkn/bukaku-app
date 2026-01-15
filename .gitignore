@@ -28,3 +28,4 @@ tests/screenshots/
 # Credentials (NEVER commit)
 *credentials*
 *secrets*
+.vercel
