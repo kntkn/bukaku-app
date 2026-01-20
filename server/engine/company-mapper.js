@@ -1,10 +1,23 @@
 /**
  * 管理会社・プラットフォーム対応表管理モジュール
  * 物確でヒットした実績を学習して対応表を更新
+ * ローカルJSONとNotion DBの両方に保存
  */
 
 const fs = require('fs');
 const path = require('path');
+const { Client } = require('@notionhq/client');
+
+// Notion クライアント（環境変数から初期化）
+let notionClient = null;
+function getNotionClient() {
+  if (!notionClient && process.env.NOTION_TOKEN) {
+    notionClient = new Client({ auth: process.env.NOTION_TOKEN });
+  }
+  return notionClient;
+}
+
+const MAPPING_DB_ID = process.env.NOTION_MAPPING_DATABASE_ID || '2ed1c197-4dad-8149-a358-d07d58166746';
 
 const MAP_FILE = path.join(__dirname, '../../data/company-platform-map.json');
 
@@ -94,11 +107,61 @@ function normalizeCompanyName(name) {
 }
 
 /**
+ * Notionに対応表を同期（upsert）
+ */
+async function syncToNotion(companyName, platforms, hitCount) {
+  const notion = getNotionClient();
+  if (!notion) {
+    console.log('[学習] Notion未設定のためスキップ');
+    return;
+  }
+
+  try {
+    // 既存レコードを検索
+    const existing = await notion.databases.query({
+      database_id: MAPPING_DB_ID,
+      filter: {
+        property: '管理会社名',
+        title: { equals: companyName }
+      }
+    });
+
+    const today = new Date().toISOString().split('T')[0];
+    const properties = {
+      '管理会社名': { title: [{ text: { content: companyName } }] },
+      'プラットフォーム': { rich_text: [{ text: { content: platforms.join(', ') } }] },
+      '確認回数': { number: hitCount },
+      '最終確認日': { date: { start: today } }
+    };
+
+    if (existing.results.length > 0) {
+      // 更新
+      await notion.pages.update({
+        page_id: existing.results[0].id,
+        properties
+      });
+      console.log(`[学習/Notion] 更新: ${companyName}`);
+    } else {
+      // 新規作成
+      await notion.pages.create({
+        parent: { database_id: MAPPING_DB_ID },
+        properties
+      });
+      console.log(`[学習/Notion] 新規: ${companyName}`);
+    }
+  } catch (err) {
+    console.error('[学習/Notion] エラー:', err.message);
+  }
+}
+
+/**
  * 物確結果を学習して対応表を更新
  * @param {string} companyName - 管理会社名
  * @param {string} platformId - ヒットしたプラットフォームID
  */
 function learnMapping(companyName, platformId) {
+  if (!companyName || !platformId) return;
+
   const map = loadMap();
   const today = new Date().toISOString().split('T')[0];
 
@@ -122,7 +185,11 @@ function learnMapping(companyName, platformId) {
 
   saveMap(map);
 
-  console.log(`[学習] ${companyName} → ${platformId} (累計: ${map.mappings[companyName].hit_count}回)`);
+  // Notionにも同期（非同期）
+  const mapping = map.mappings[companyName];
+  syncToNotion(companyName, mapping.platforms, mapping.hit_count).catch(() => {});
+
+  console.log(`[学習] ${companyName} → ${platformId} (累計: ${mapping.hit_count}回)`);
 }
 
 /**

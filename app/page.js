@@ -74,6 +74,27 @@ export default function Home() {
     }
   };
 
+  // Notionに単一物件の結果を保存
+  const saveToNotion = async (property, results) => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/notion/record`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          propertyName: property.property_name,
+          results: results || [],
+          platform: 'itandi',
+          parsedData: property
+        })
+      });
+      const data = await response.json();
+      return data.success;
+    } catch (err) {
+      console.error('Notion保存エラー:', err);
+      return false;
+    }
+  };
+
   // 単一物件の物確を実行（Promise返却）
   const checkSingleProperty = (property, index) => {
     return new Promise((resolve) => {
@@ -94,7 +115,7 @@ export default function Home() {
         .then(res => res.json())
         .then(startData => {
           if (!startData.success) {
-            resolve({ property, success: false, error: startData.error });
+            resolve({ property, success: false, error: startData.error, notionSaved: false });
             return;
           }
 
@@ -105,7 +126,7 @@ export default function Home() {
             ws.send(JSON.stringify({ type: 'start_bukaku', sessionId }));
           };
 
-          ws.onmessage = (event) => {
+          ws.onmessage = async (event) => {
             const data = JSON.parse(event.data);
             if (data.type === 'status') {
               setStatusMessage(`[${index + 1}/${parsedData.length}] ${data.message}`);
@@ -113,19 +134,22 @@ export default function Home() {
               setScreenshot(data.image);
             } else if (data.type === 'result') {
               ws.close();
-              resolve({ property, success: data.success, results: data.results || [], error: data.error });
+              // 自動でNotionに保存
+              setStatusMessage(`[${index + 1}/${parsedData.length}] Notionに保存中...`);
+              const notionSaved = await saveToNotion(property, data.results);
+              resolve({ property, success: data.success, results: data.results || [], error: data.error, notionSaved });
             } else if (data.type === 'error') {
               ws.close();
-              resolve({ property, success: false, error: data.message });
+              resolve({ property, success: false, error: data.message, notionSaved: false });
             }
           };
 
           ws.onerror = () => {
-            resolve({ property, success: false, error: 'WebSocket接続エラー' });
+            resolve({ property, success: false, error: 'WebSocket接続エラー', notionSaved: false });
           };
         })
         .catch(err => {
-          resolve({ property, success: false, error: err.message });
+          resolve({ property, success: false, error: err.message, notionSaved: false });
         });
     });
   };
@@ -533,50 +557,36 @@ export default function Home() {
               </div>
             ))}
 
-            {/* Notion記録ボタン */}
-            <div style={{ marginTop: '20px' }}>
-              <button
-                onClick={handleNotionRecord}
-                disabled={isRecording}
-                style={{
-                  ...styles.button,
-                  backgroundColor: '#10b981',
-                  opacity: isRecording ? 0.6 : 1,
-                  cursor: isRecording ? 'not-allowed' : 'pointer'
-                }}
-              >
-                {isRecording ? 'Notionに記録中...' : 'Notionに記録'}
-              </button>
-
-              {notionResult && (
+            {/* Notion確認リンク（物確完了後に表示） */}
+            {!isLoading && (
+              <div style={{ marginTop: '20px' }}>
                 <div style={{
-                  marginTop: '12px',
                   padding: '12px',
                   borderRadius: '6px',
-                  backgroundColor: notionResult.success ? '#f0fdf4' : '#fef2f2',
-                  color: notionResult.success ? '#166534' : '#dc2626',
-                  border: `1px solid ${notionResult.success ? '#86efac' : '#fecaca'}`
+                  backgroundColor: '#f0fdf4',
+                  border: '1px solid #86efac',
+                  marginBottom: '12px'
                 }}>
-                  {notionResult.success ? (
-                    <>
-                      Notionに記録しました
-                      {notionResult.url && (
-                        <a
-                          href={notionResult.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ marginLeft: '8px', color: '#0369a1' }}
-                        >
-                          開く
-                        </a>
-                      )}
-                    </>
-                  ) : (
-                    <>エラー: {notionResult.error}</>
-                  )}
+                  <span style={{ color: '#166534' }}>
+                    {bukakuResults.filter(r => r.notionSaved).length}/{bukakuResults.length}件をNotionに保存しました
+                  </span>
                 </div>
-              )}
-            </div>
+                <a
+                  href="https://www.notion.so/2e21c1974dad81bfad4ace49ca030e9e"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    ...styles.button,
+                    backgroundColor: '#10b981',
+                    display: 'block',
+                    textAlign: 'center',
+                    textDecoration: 'none'
+                  }}
+                >
+                  Notionで確認する
+                </a>
+              </div>
+            )}
           </section>
         )}
       </main>
