@@ -15,6 +15,7 @@ export default function Home() {
 
   // リアルタイムプレビュー用のstate
   const [screenshot, setScreenshot] = useState(null);
+  const [parallelScreenshots, setParallelScreenshots] = useState([]); // 並列検索用（最大4枚）
   const [statusMessage, setStatusMessage] = useState('');
   const wsRef = useRef(null);
 
@@ -163,47 +164,68 @@ export default function Home() {
     });
   };
 
-  // 並列検索（REST API、複数プラットフォーム同時）
-  const searchParallel = async (property, index) => {
-    setStatusMessage(`[${index + 1}/${parsedData.length}] 複数プラットフォームで並列検索中...`);
-    setScreenshot(null); // 並列検索中はスクリーンショットなし（将来対応）
+  // 並列検索（WebSocket、4ブラウザ同時リアルタイムスクリーンショット）
+  const searchParallel = (property, index, platforms) => {
+    return new Promise((resolve) => {
+      setStatusMessage(`[${index + 1}/${parsedData.length}] 複数プラットフォームで並列検索中...`);
+      setScreenshot(null);
+      setParallelScreenshots([]);
 
-    try {
-      const response = await fetch(`${BACKEND_URL}/api/bukaku/parallel`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const ws = new WebSocket(WS_URL);
+
+      ws.onopen = () => {
+        ws.send(JSON.stringify({
+          type: 'start_parallel',
           propertyName: property.property_name?.trim(),
           managementCompany: property.management_company,
           checkAD,
-          stopOnFirstHit: true
-        })
-      });
-      const data = await response.json();
+          platforms
+        }));
+      };
 
-      if (data.success && data.hits?.length > 0) {
-        // ヒットしたプラットフォームの結果をまとめる
-        const allResults = data.hits.flatMap(hit => hit.results.map(r => ({
-          ...r,
-          platform: hit.platformId
-        })));
-        return {
-          success: true,
-          results: allResults,
-          platform: data.hits.map(h => h.platformId).join(', '),
-          strategy: data.strategy
-        };
-      } else {
-        return {
-          success: true,
-          results: [],
-          platform: 'parallel',
-          strategy: data.strategy
-        };
-      }
-    } catch (err) {
-      return { success: false, error: err.message, platform: 'parallel' };
-    }
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        if (data.type === 'status') {
+          setStatusMessage(`[${index + 1}/${parsedData.length}] ${data.message}`);
+        } else if (data.type === 'screenshots') {
+          // 複数スクリーンショットを更新
+          setParallelScreenshots(data.images);
+        } else if (data.type === 'result') {
+          ws.close();
+          setParallelScreenshots([]);
+
+          if (data.success && data.hits?.length > 0) {
+            const allResults = data.hits.flatMap(hit => hit.results.map(r => ({
+              ...r,
+              platform: hit.platformId
+            })));
+            resolve({
+              success: true,
+              results: allResults,
+              platform: data.hits.map(h => h.platformId).join(', '),
+              strategy: 'parallel'
+            });
+          } else {
+            resolve({
+              success: true,
+              results: [],
+              platform: 'parallel',
+              strategy: 'parallel'
+            });
+          }
+        } else if (data.type === 'error') {
+          ws.close();
+          setParallelScreenshots([]);
+          resolve({ success: false, error: data.message, platform: 'parallel' });
+        }
+      };
+
+      ws.onerror = () => {
+        setParallelScreenshots([]);
+        resolve({ success: false, error: 'WebSocket接続エラー', platform: 'parallel' });
+      };
+    });
   };
 
   // 単一物件の物確を実行（戦略に基づいて単一/並列を切り替え）
@@ -226,7 +248,7 @@ export default function Home() {
     } else {
       // 2b. 対応表になし → 並列検索
       setStatusMessage(`[${index + 1}/${parsedData.length}] 対応表なし: 並列検索開始`);
-      searchResult = await searchParallel(property, index);
+      searchResult = await searchParallel(property, index, strategyResult.platforms || []);
     }
 
     // 3. Notionに保存
@@ -568,20 +590,58 @@ export default function Home() {
               <span>{statusMessage}</span>
             </div>
 
-            {/* スクリーンショットプレビュー */}
-            <div style={styles.previewContainer}>
-              {screenshot ? (
+            {/* 並列検索時: 4画面グリッド表示 */}
+            {parallelScreenshots.length > 0 ? (
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(2, 1fr)',
+                gap: '8px',
+                backgroundColor: '#1f2937',
+                padding: '8px',
+                borderRadius: '8px'
+              }}>
+                {parallelScreenshots.map((item, idx) => (
+                  <div key={idx} style={{ position: 'relative' }}>
+                    <img
+                      src={item.image}
+                      alt={`${item.platformId}`}
+                      style={{
+                        width: '100%',
+                        height: 'auto',
+                        borderRadius: '4px'
+                      }}
+                    />
+                    <span style={{
+                      position: 'absolute',
+                      top: '4px',
+                      left: '4px',
+                      backgroundColor: 'rgba(0,0,0,0.7)',
+                      color: 'white',
+                      padding: '2px 8px',
+                      borderRadius: '4px',
+                      fontSize: '11px'
+                    }}>
+                      {item.platformId}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : screenshot ? (
+              /* 単一検索時: 1画面表示 */
+              <div style={styles.previewContainer}>
                 <img
                   src={screenshot}
                   alt="実行中の画面"
                   style={styles.previewImage}
                 />
-              ) : (
+              </div>
+            ) : (
+              <div style={styles.previewContainer}>
                 <div style={styles.previewPlaceholder}>
                   <p>ブラウザを起動中...</p>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
           </section>
         )}
 
