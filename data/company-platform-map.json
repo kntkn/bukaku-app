@@ -1,0 +1,49 @@
+{
+  "description": "管理会社とプラットフォームの対応表。物確でヒットした実績を元に学習・更新される。",
+  "updated_at": "2025-01-19T00:00:00Z",
+  "mappings": {
+    "例: 株式会社ABC不動産": {
+      "platforms": ["itandi"],
+      "hit_count": 1,
+      "last_hit": "2025-01-19"
+    }
+  },
+  "known_companies": {
+    "生和コーポレーション": {
+      "platforms": ["seiwa"],
+      "note": "セイワドットネット専用"
+    },
+    "大東建託": {
+      "platforms": ["daitoservice"],
+      "note": "大東建託ポータル専用"
+    },
+    "日本財託": {
+      "platforms": ["zaitaku"],
+      "note": "日本財宅管理サービス専用"
+    },
+    "グッドワークス": {
+      "platforms": ["goodworks"],
+      "note": "自社物件"
+    },
+    "ジョイントプロパティ": {
+      "platforms": ["jointproperty"],
+      "note": "自社物件"
+    },
+    "シマダハウス": {
+      "platforms": ["shimadahouse"],
+      "note": "自社物件"
+    },
+    "ジェイエーアメニティーハウス": {
+      "platforms": ["jaamenity"],
+      "note": "自社物件"
+    },
+    "アンビション": {
+      "platforms": ["ambition"],
+      "note": "自社物件"
+    },
+    "金太郎カンパニー": {
+      "platforms": ["kintarou"],
+      "note": "自社物件"
+    }
+  }
+}

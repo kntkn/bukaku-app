@@ -76,8 +76,10 @@ export default function Home() {
   };
 
   const handleBukaku = async () => {
-    if (!propertyName.trim()) {
-      setError('物件名を入力してください');
+    // マイソクから物件名を取得、なければエラー
+    const propertyNameToSearch = parsedData?.property_name || propertyName;
+    if (!propertyNameToSearch?.trim()) {
+      setError('マイソクを解析して物件名を抽出してください');
       return;
     }
 
@@ -93,9 +95,10 @@ export default function Home() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          propertyName: propertyName.trim(),
+          propertyName: propertyNameToSearch.trim(),
           checkAD,
-          platform: 'itandi'
+          platform: 'itandi',
+          managementCompany: parsedData?.management_company
         })
       });
 
@@ -307,55 +310,51 @@ export default function Home() {
               </div>
             </div>
           )}
-        </section>
 
-        {/* 検索フォーム */}
-        <section style={styles.section}>
-          <h2 style={styles.sectionTitle}>物件検索</h2>
+          {/* ADチェックと物確開始 */}
+          {parsedData && (
+            <div style={{ marginTop: '20px' }}>
+              <div style={styles.checkboxGroup}>
+                <label style={styles.checkboxLabel}>
+                  <input
+                    type="checkbox"
+                    checked={checkAD}
+                    onChange={(e) => setCheckAD(e.target.checked)}
+                    disabled={isLoading}
+                  />
+                  <span style={{ marginLeft: 8 }}>AD有りのみ表示</span>
+                </label>
+              </div>
 
-          <div style={styles.inputGroup}>
-            <label style={styles.label}>物件名</label>
-            <input
-              type="text"
-              value={propertyName}
-              onChange={(e) => setPropertyName(e.target.value)}
-              placeholder="例: パームス代々木"
-              style={styles.input}
-              disabled={isLoading}
-            />
-          </div>
-
-          <div style={styles.checkboxGroup}>
-            <label style={styles.checkboxLabel}>
-              <input
-                type="checkbox"
-                checked={checkAD}
-                onChange={(e) => setCheckAD(e.target.checked)}
-                disabled={isLoading}
-              />
-              <span style={{ marginLeft: 8 }}>AD有りのみ表示</span>
-            </label>
-          </div>
-
-          {isLoading ? (
-            <button
-              onClick={handleCancel}
-              style={{
-                ...styles.button,
-                backgroundColor: '#6b7280'
-              }}
-            >
-              キャンセル
-            </button>
-          ) : (
-            <button
-              onClick={handleBukaku}
-              style={styles.button}
-            >
-              物確開始
-            </button>
+              {isLoading ? (
+                <button
+                  onClick={handleCancel}
+                  style={{
+                    ...styles.button,
+                    backgroundColor: '#6b7280',
+                    marginTop: '12px'
+                  }}
+                >
+                  キャンセル
+                </button>
+              ) : (
+                <button
+                  onClick={handleBukaku}
+                  disabled={!parsedData?.property_name}
+                  style={{
+                    ...styles.button,
+                    marginTop: '12px',
+                    opacity: parsedData?.property_name ? 1 : 0.6,
+                    cursor: parsedData?.property_name ? 'pointer' : 'not-allowed'
+                  }}
+                >
+                  物確開始
+                </button>
+              )}
+            </div>
           )}
         </section>
+
 
         {/* リアルタイムプレビュー */}
         {isLoading && (

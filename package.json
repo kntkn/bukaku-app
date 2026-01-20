@@ -20,6 +20,7 @@
     "@anthropic-ai/sdk": "^0.71.2",
     "@notionhq/client": "^5.7.0",
     "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "multer": "^2.0.2",
     "next": "^16.1.2",

@@ -3,6 +3,9 @@
  * WebSocket対応版 - リアルタイムプレビュー機能付き
  */
 
+// 環境変数を読み込み
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
@@ -12,6 +15,10 @@ const multer = require('multer');
 const pdfParse = require('pdf-parse');
 const Anthropic = require('@anthropic-ai/sdk');
 const { Client } = require('@notionhq/client');
+
+// 並列検索・学習機能モジュール
+const { parallelSearch, searchOnPlatform } = require('./engine/parallel-searcher');
+const { getSearchStrategy, learnMapping, getStats } = require('./engine/company-mapper');
 
 const app = express();
 
@@ -324,12 +331,128 @@ async function executeBukaku(ws, session, sessionId) {
 
 // 対応プラットフォーム一覧
 app.get('/api/platforms', (req, res) => {
-  res.json({
-    platforms: [
-      { id: 'itandi', name: 'ITANDI BB', status: 'active' },
-      { id: 'ierabu', name: 'いえらぶ', status: 'planned' }
-    ]
-  });
+  const fs = require('fs');
+  const path = require('path');
+  const credentialsPath = path.join(__dirname, '../data/credentials.json');
+  const credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf-8'));
+
+  const platforms = Object.entries(credentials.platforms).map(([id, info]) => ({
+    id,
+    name: info.name,
+    status: 'active'
+  }));
+
+  res.json({ platforms });
+});
+
+/**
+ * 並列検索エンドポイント
+ * 管理会社名があれば検索戦略を決定、なければ全プラットフォーム並列検索
+ */
+app.post('/api/bukaku/parallel', async (req, res) => {
+  const { propertyName, managementCompany, checkAD, stopOnFirstHit = true } = req.body;
+
+  if (!propertyName) {
+    return res.status(400).json({
+      success: false,
+      error: '物件名が必要です'
+    });
+  }
+
+  console.log(`[並列物確] 開始: ${propertyName}, 管理会社: ${managementCompany || '不明'}`);
+
+  try {
+    // 検索戦略を決定
+    const strategy = getSearchStrategy(managementCompany);
+    console.log(`[並列物確] 戦略: ${strategy.strategy}, プラットフォーム: ${strategy.platforms.join(', ')}`);
+
+    // 並列検索を実行
+    const searchResult = await parallelSearch(propertyName, {
+      platforms: strategy.platforms,
+      batchSize: 4,
+      stopOnFirstHit,
+      onStatus: (platformId, status, message) => {
+        console.log(`[${platformId}] ${status}: ${message}`);
+      }
+    });
+
+    // ADフィルタリング
+    let filteredHits = searchResult.hits;
+    if (checkAD) {
+      filteredHits = searchResult.hits.map(hit => ({
+        ...hit,
+        results: hit.results.filter(r => r.has_ad)
+      })).filter(hit => hit.results.length > 0);
+    }
+
+    res.json({
+      success: true,
+      property_name: propertyName,
+      management_company: managementCompany,
+      strategy: strategy.strategy,
+      hits: filteredHits,
+      misses: searchResult.misses,
+      errors: searchResult.errors,
+      stats: getStats()
+    });
+
+  } catch (error) {
+    console.error('[並列物確] エラー:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * 学習機能エンドポイント
+ * 物確結果から管理会社→プラットフォームの対応を学習
+ */
+app.post('/api/learn', (req, res) => {
+  const { managementCompany, platformId } = req.body;
+
+  if (!managementCompany || !platformId) {
+    return res.status(400).json({
+      success: false,
+      error: '管理会社名とプラットフォームIDが必要です'
+    });
+  }
+
+  try {
+    learnMapping(managementCompany, platformId);
+    const stats = getStats();
+
+    res.json({
+      success: true,
+      message: `学習完了: ${managementCompany} → ${platformId}`,
+      stats
+    });
+  } catch (error) {
+    console.error('[学習] エラー:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * 対応表統計エンドポイント
+ */
+app.get('/api/stats', (req, res) => {
+  try {
+    const stats = getStats();
+    res.json({
+      success: true,
+      stats
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 
 /**
@@ -380,7 +503,7 @@ JSONフォーマットで出力してください。不明な項目はnullとし
 ${extractedText.substring(0, 8000)}`;
 
     const message = await anthropic.messages.create({
-      model: 'claude-3-5-sonnet-20241022',
+      model: 'claude-sonnet-4-20250514',
       max_tokens: 1024,
       messages: [
         { role: 'user', content: prompt }
@@ -424,10 +547,22 @@ ${extractedText.substring(0, 8000)}`;
 
 /**
  * Notion連携 - 物確結果を記録
+ * 管理会社とプラットフォームの組み合わせを学習
  */
 app.post('/api/notion/record', async (req, res) => {
   try {
-    const { propertyName, results, platform, parsedData } = req.body;
+    const { propertyName, results, platform, parsedData, managementCompany } = req.body;
+
+    // 管理会社とプラットフォームの組み合わせを学習
+    const companyName = managementCompany || parsedData?.management_company;
+    if (companyName && platform) {
+      try {
+        learnMapping(companyName, platform);
+        console.log(`[学習] ${companyName} → ${platform}`);
+      } catch (e) {
+        console.error('[学習] エラー:', e.message);
+      }
+    }
 
     if (!process.env.NOTION_TOKEN || !process.env.NOTION_DATABASE_ID) {
       return res.status(400).json({
