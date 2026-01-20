@@ -75,7 +75,7 @@ export default function Home() {
   };
 
   // Notionに単一物件の結果を保存
-  const saveToNotion = async (property, results) => {
+  const saveToNotion = async (property, results, platform = 'unknown') => {
     try {
       const response = await fetch(`${BACKEND_URL}/api/notion/record`, {
         method: 'POST',
@@ -83,7 +83,7 @@ export default function Home() {
         body: JSON.stringify({
           propertyName: property.property_name,
           results: results || [],
-          platform: 'itandi',
+          platform,
           parsedData: property
         })
       });
@@ -95,12 +95,24 @@ export default function Home() {
     }
   };
 
-  // 単一物件の物確を実行（Promise返却）
-  const checkSingleProperty = (property, index) => {
+  // 検索戦略を取得（対応表確認）
+  const getStrategy = async (managementCompany) => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/bukaku/strategy`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ managementCompany })
+      });
+      return await response.json();
+    } catch (err) {
+      return { success: false, strategy: 'parallel', platforms: [] };
+    }
+  };
+
+  // 単一プラットフォーム検索（WebSocket、リアルタイムスクリーンショット）
+  const searchSinglePlatform = (property, platform, index) => {
     return new Promise((resolve) => {
-      setCurrentBukakuIndex(index);
-      setStatusMessage(`${property.property_name || `物件${index + 1}`} を確認中...`);
-      setScreenshot(null);
+      setStatusMessage(`[${index + 1}/${parsedData.length}] ${platform}で検索中...`);
 
       fetch(`${BACKEND_URL}/api/bukaku/start`, {
         method: 'POST',
@@ -108,14 +120,14 @@ export default function Home() {
         body: JSON.stringify({
           propertyName: property.property_name?.trim(),
           checkAD,
-          platform: 'itandi',
+          platform,
           managementCompany: property.management_company
         })
       })
         .then(res => res.json())
         .then(startData => {
           if (!startData.success) {
-            resolve({ property, success: false, error: startData.error, notionSaved: false });
+            resolve({ success: false, error: startData.error, platform });
             return;
           }
 
@@ -126,7 +138,7 @@ export default function Home() {
             ws.send(JSON.stringify({ type: 'start_bukaku', sessionId }));
           };
 
-          ws.onmessage = async (event) => {
+          ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
             if (data.type === 'status') {
               setStatusMessage(`[${index + 1}/${parsedData.length}] ${data.message}`);
@@ -134,24 +146,102 @@ export default function Home() {
               setScreenshot(data.image);
             } else if (data.type === 'result') {
               ws.close();
-              // 自動でNotionに保存
-              setStatusMessage(`[${index + 1}/${parsedData.length}] Notionに保存中...`);
-              const notionSaved = await saveToNotion(property, data.results);
-              resolve({ property, success: data.success, results: data.results || [], error: data.error, notionSaved });
+              resolve({ success: data.success, results: data.results || [], platform });
             } else if (data.type === 'error') {
               ws.close();
-              resolve({ property, success: false, error: data.message, notionSaved: false });
+              resolve({ success: false, error: data.message, platform });
             }
           };
 
           ws.onerror = () => {
-            resolve({ property, success: false, error: 'WebSocket接続エラー', notionSaved: false });
+            resolve({ success: false, error: 'WebSocket接続エラー', platform });
           };
         })
         .catch(err => {
-          resolve({ property, success: false, error: err.message, notionSaved: false });
+          resolve({ success: false, error: err.message, platform });
         });
     });
+  };
+
+  // 並列検索（REST API、複数プラットフォーム同時）
+  const searchParallel = async (property, index) => {
+    setStatusMessage(`[${index + 1}/${parsedData.length}] 複数プラットフォームで並列検索中...`);
+    setScreenshot(null); // 並列検索中はスクリーンショットなし（将来対応）
+
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/bukaku/parallel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          propertyName: property.property_name?.trim(),
+          managementCompany: property.management_company,
+          checkAD,
+          stopOnFirstHit: true
+        })
+      });
+      const data = await response.json();
+
+      if (data.success && data.hits?.length > 0) {
+        // ヒットしたプラットフォームの結果をまとめる
+        const allResults = data.hits.flatMap(hit => hit.results.map(r => ({
+          ...r,
+          platform: hit.platformId
+        })));
+        return {
+          success: true,
+          results: allResults,
+          platform: data.hits.map(h => h.platformId).join(', '),
+          strategy: data.strategy
+        };
+      } else {
+        return {
+          success: true,
+          results: [],
+          platform: 'parallel',
+          strategy: data.strategy
+        };
+      }
+    } catch (err) {
+      return { success: false, error: err.message, platform: 'parallel' };
+    }
+  };
+
+  // 単一物件の物確を実行（戦略に基づいて単一/並列を切り替え）
+  const checkSingleProperty = async (property, index) => {
+    setCurrentBukakuIndex(index);
+    setStatusMessage(`${property.property_name || `物件${index + 1}`} の検索戦略を確認中...`);
+    setScreenshot(null);
+
+    // 1. 対応表を確認して検索戦略を取得
+    const strategyResult = await getStrategy(property.management_company);
+    console.log(`[戦略] ${property.management_company || '不明'} → ${strategyResult.strategy}`);
+
+    let searchResult;
+
+    if (strategyResult.strategy === 'single' && strategyResult.platforms?.length > 0) {
+      // 2a. 対応表にヒット → 単一プラットフォーム検索
+      const platform = strategyResult.platforms[0];
+      setStatusMessage(`[${index + 1}/${parsedData.length}] 対応表ヒット: ${platform}で検索`);
+      searchResult = await searchSinglePlatform(property, platform, index);
+    } else {
+      // 2b. 対応表になし → 並列検索
+      setStatusMessage(`[${index + 1}/${parsedData.length}] 対応表なし: 並列検索開始`);
+      searchResult = await searchParallel(property, index);
+    }
+
+    // 3. Notionに保存
+    setStatusMessage(`[${index + 1}/${parsedData.length}] Notionに保存中...`);
+    const notionSaved = await saveToNotion(property, searchResult.results, searchResult.platform);
+
+    return {
+      property,
+      success: searchResult.success,
+      results: searchResult.results || [],
+      error: searchResult.error,
+      platform: searchResult.platform,
+      strategy: strategyResult.strategy,
+      notionSaved
+    };
   };
 
   // 全物件を順次物確
@@ -410,16 +500,29 @@ export default function Home() {
                         <span style={{ fontSize: 12, color: '#3b82f6' }}>確認中...</span>
                       )}
                       {bukakuResult && (
-                        <span style={{
-                          fontSize: 12,
-                          color: bukakuResult.success ? '#10b981' : '#ef4444'
-                        }}>
-                          {bukakuResult.success ? `${bukakuResult.results?.length || 0}件` : 'エラー'}
-                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          {bukakuResult.platform && (
+                            <span style={{
+                              fontSize: 10,
+                              padding: '2px 6px',
+                              borderRadius: 4,
+                              backgroundColor: bukakuResult.strategy === 'single' ? '#dbeafe' : '#fef3c7',
+                              color: bukakuResult.strategy === 'single' ? '#1e40af' : '#92400e'
+                            }}>
+                              {bukakuResult.platform}
+                            </span>
+                          )}
+                          <span style={{
+                            fontSize: 12,
+                            color: bukakuResult.success ? '#10b981' : '#ef4444'
+                          }}>
+                            {bukakuResult.success ? `${bukakuResult.results?.length || 0}件` : 'エラー'}
+                          </span>
+                        </div>
                       )}
                     </div>
                     <div style={{ fontSize: 12, color: '#6b7280', marginTop: 4 }}>
-                      {property.rent} / {property.floor_plan || '-'}
+                      {property.rent} / {property.floor_plan || '-'} {property.management_company && `/ ${property.management_company}`}
                     </div>
                   </div>
                 );
@@ -507,9 +610,23 @@ export default function Home() {
                 borderColor: bukaku.success ? '#10b981' : '#ef4444'
               }}>
                 <div style={styles.resultHeader}>
-                  <span style={{ fontWeight: 600, fontSize: 15 }}>
-                    {bukaku.property?.property_name || `物件${index + 1}`}
-                  </span>
+                  <div>
+                    <span style={{ fontWeight: 600, fontSize: 15 }}>
+                      {bukaku.property?.property_name || `物件${index + 1}`}
+                    </span>
+                    {bukaku.platform && (
+                      <span style={{
+                        fontSize: 11,
+                        marginLeft: 8,
+                        padding: '2px 8px',
+                        borderRadius: 4,
+                        backgroundColor: bukaku.strategy === 'single' ? '#dbeafe' : '#fef3c7',
+                        color: bukaku.strategy === 'single' ? '#1e40af' : '#92400e'
+                      }}>
+                        {bukaku.strategy === 'single' ? '対応表ヒット' : '並列検索'}: {bukaku.platform}
+                      </span>
+                    )}
+                  </div>
                   {!bukaku.success && (
                     <span style={{ ...styles.statusBadge, backgroundColor: '#ef4444' }}>
                       エラー

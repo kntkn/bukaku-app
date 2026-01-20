@@ -406,6 +406,32 @@ app.post('/api/bukaku/parallel', async (req, res) => {
 });
 
 /**
+ * 検索戦略確認エンドポイント
+ * 管理会社名から検索戦略（単一/並列）を判定
+ */
+app.post('/api/bukaku/strategy', (req, res) => {
+  const { managementCompany } = req.body;
+
+  try {
+    const strategy = getSearchStrategy(managementCompany);
+    console.log(`[戦略確認] 管理会社: ${managementCompany || '不明'} → ${strategy.strategy} (${strategy.platforms.join(', ')})`);
+
+    res.json({
+      success: true,
+      managementCompany: managementCompany || null,
+      strategy: strategy.strategy,
+      platforms: strategy.platforms,
+      platformCount: strategy.platforms.length
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
  * 学習機能エンドポイント
  * 物確結果から管理会社→プラットフォームの対応を学習
  */
