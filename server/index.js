@@ -577,17 +577,18 @@ app.post('/api/notion/record', async (req, res) => {
     console.log('[Notion] 物確結果を記録:', propertyName);
 
     // 結果をまとめて1つのページとして記録
+    // プロパティ名はNotionの物確結果DBに合わせる
     const properties = {
       '物件名': {
         title: [{ text: { content: propertyName || '不明' } }]
       },
-      'プラットフォーム': {
-        select: { name: platform?.toUpperCase() || 'ITANDI' }
+      'ヒットプラットフォーム': {
+        rich_text: [{ text: { content: platform?.toUpperCase() || 'ITANDI' } }]
       },
       '確認日時': {
         date: { start: new Date().toISOString() }
       },
-      '結果件数': {
+      '確認サイト数': {
         number: results?.length || 0
       }
     };
@@ -596,37 +597,43 @@ app.post('/api/notion/record', async (req, res) => {
     if (results && results.length > 0) {
       const firstResult = results[0];
 
-      properties['ステータス'] = {
+      // 空室状況: 空室あり, 満室, 不明, 要電話確認
+      properties['空室状況'] = {
         select: {
-          name: firstResult.status === 'available' ? '募集中' :
-            firstResult.status === 'applied' ? '申込あり' : '確認不可'
+          name: firstResult.status === 'available' ? '空室あり' :
+            firstResult.status === 'applied' ? '要電話確認' : '不明'
         }
       };
 
-      properties['AD有り'] = {
+      properties['AD有無'] = {
         checkbox: firstResult.has_ad || false
       };
 
-      properties['内見可'] = {
+      properties['内見可否'] = {
         checkbox: firstResult.viewing_available || false
       };
     }
 
-    // マイソクデータがあれば追加
-    if (parsedData) {
-      if (parsedData.address) {
+    // マイソクデータがあれば追加（配列の場合は最初の要素を使用）
+    const maisokuData = Array.isArray(parsedData) ? parsedData[0] : parsedData;
+    if (maisokuData) {
+      if (maisokuData.address) {
         properties['住所'] = {
-          rich_text: [{ text: { content: parsedData.address } }]
+          rich_text: [{ text: { content: maisokuData.address } }]
         };
       }
-      if (parsedData.rent) {
-        properties['賃料'] = {
-          rich_text: [{ text: { content: parsedData.rent } }]
-        };
+      if (maisokuData.rent) {
+        // 賃料から数字を抽出（例: "90,000円" → 90000）
+        const rentNumber = parseInt(maisokuData.rent.replace(/[^0-9]/g, ''), 10);
+        if (!isNaN(rentNumber)) {
+          properties['賓料'] = {
+            number: rentNumber
+          };
+        }
       }
-      if (parsedData.management_company) {
+      if (maisokuData.management_company) {
         properties['管理会社'] = {
-          rich_text: [{ text: { content: parsedData.management_company } }]
+          rich_text: [{ text: { content: maisokuData.management_company } }]
         };
       }
     }
