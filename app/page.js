@@ -60,10 +60,12 @@ export default function Home() {
       const data = await response.json();
 
       if (data.success) {
-        setParsedData(data.data);
-        // 物件名が取得できたら自動入力
-        if (data.data.property_name) {
-          setPropertyName(data.data.property_name);
+        // APIは配列を返す（複数物件対応）。最初の物件を使用
+        const properties = Array.isArray(data.data) ? data.data : [data.data];
+        setParsedData(properties);
+        // 物件名が取得できたら自動入力（最初の物件）
+        if (properties.length > 0 && properties[0].property_name) {
+          setPropertyName(properties[0].property_name);
         }
       } else {
         setError(data.error || 'マイソク解析に失敗しました');
@@ -76,8 +78,9 @@ export default function Home() {
   };
 
   const handleBukaku = async () => {
-    // マイソクから物件名を取得、なければエラー
-    const propertyNameToSearch = parsedData?.property_name || propertyName;
+    // マイソクから物件名を取得（配列の最初の物件）、なければエラー
+    const firstProperty = parsedData?.[0];
+    const propertyNameToSearch = firstProperty?.property_name || propertyName;
     if (!propertyNameToSearch?.trim()) {
       setError('マイソクを解析して物件名を抽出してください');
       return;
@@ -98,7 +101,7 @@ export default function Home() {
           propertyName: propertyNameToSearch.trim(),
           checkAD,
           platform: 'itandi',
-          managementCompany: parsedData?.management_company
+          managementCompany: firstProperty?.management_company
         })
       });
 
@@ -273,46 +276,61 @@ export default function Home() {
           </button>
 
           {/* 解析結果表示 */}
-          {parsedData && (
+          {parsedData && parsedData.length > 0 && (
             <div style={styles.parsedDataBox}>
-              <h3 style={{ fontSize: 16, marginBottom: 12 }}>抽出された物件情報</h3>
-              <div style={styles.parsedGrid}>
-                {parsedData.property_name && (
-                  <div style={styles.parsedItem}>
-                    <span style={styles.parsedLabel}>物件名</span>
-                    <span style={styles.parsedValue}>{parsedData.property_name}</span>
+              <h3 style={{ fontSize: 16, marginBottom: 12 }}>
+                抽出された物件情報 ({parsedData.length}件)
+              </h3>
+              {parsedData.map((property, index) => (
+                <div key={index} style={{
+                  marginBottom: index < parsedData.length - 1 ? '16px' : 0,
+                  paddingBottom: index < parsedData.length - 1 ? '16px' : 0,
+                  borderBottom: index < parsedData.length - 1 ? '1px solid #86efac' : 'none'
+                }}>
+                  {parsedData.length > 1 && (
+                    <p style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, color: '#166534' }}>
+                      物件 {index + 1}
+                    </p>
+                  )}
+                  <div style={styles.parsedGrid}>
+                    {property.property_name && (
+                      <div style={styles.parsedItem}>
+                        <span style={styles.parsedLabel}>物件名</span>
+                        <span style={styles.parsedValue}>{property.property_name}</span>
+                      </div>
+                    )}
+                    {property.address && (
+                      <div style={styles.parsedItem}>
+                        <span style={styles.parsedLabel}>住所</span>
+                        <span style={styles.parsedValue}>{property.address}</span>
+                      </div>
+                    )}
+                    {property.rent && (
+                      <div style={styles.parsedItem}>
+                        <span style={styles.parsedLabel}>賃料</span>
+                        <span style={styles.parsedValue}>{property.rent}</span>
+                      </div>
+                    )}
+                    {property.floor_plan && (
+                      <div style={styles.parsedItem}>
+                        <span style={styles.parsedLabel}>間取り</span>
+                        <span style={styles.parsedValue}>{property.floor_plan}</span>
+                      </div>
+                    )}
+                    {property.management_company && (
+                      <div style={styles.parsedItem}>
+                        <span style={styles.parsedLabel}>管理会社</span>
+                        <span style={styles.parsedValue}>{property.management_company}</span>
+                      </div>
+                    )}
                   </div>
-                )}
-                {parsedData.address && (
-                  <div style={styles.parsedItem}>
-                    <span style={styles.parsedLabel}>住所</span>
-                    <span style={styles.parsedValue}>{parsedData.address}</span>
-                  </div>
-                )}
-                {parsedData.rent && (
-                  <div style={styles.parsedItem}>
-                    <span style={styles.parsedLabel}>賃料</span>
-                    <span style={styles.parsedValue}>{parsedData.rent}</span>
-                  </div>
-                )}
-                {parsedData.floor_plan && (
-                  <div style={styles.parsedItem}>
-                    <span style={styles.parsedLabel}>間取り</span>
-                    <span style={styles.parsedValue}>{parsedData.floor_plan}</span>
-                  </div>
-                )}
-                {parsedData.management_company && (
-                  <div style={styles.parsedItem}>
-                    <span style={styles.parsedLabel}>管理会社</span>
-                    <span style={styles.parsedValue}>{parsedData.management_company}</span>
-                  </div>
-                )}
-              </div>
+                </div>
+              ))}
             </div>
           )}
 
           {/* ADチェックと物確開始 */}
-          {parsedData && (
+          {parsedData && parsedData.length > 0 && (
             <div style={{ marginTop: '20px' }}>
               <div style={styles.checkboxGroup}>
                 <label style={styles.checkboxLabel}>
@@ -340,12 +358,12 @@ export default function Home() {
               ) : (
                 <button
                   onClick={handleBukaku}
-                  disabled={!parsedData?.property_name}
+                  disabled={!parsedData?.[0]?.property_name}
                   style={{
                     ...styles.button,
                     marginTop: '12px',
-                    opacity: parsedData?.property_name ? 1 : 0.6,
-                    cursor: parsedData?.property_name ? 'pointer' : 'not-allowed'
+                    opacity: parsedData?.[0]?.property_name ? 1 : 0.6,
+                    cursor: parsedData?.[0]?.property_name ? 'pointer' : 'not-allowed'
                   }}
                 >
                   物確開始
