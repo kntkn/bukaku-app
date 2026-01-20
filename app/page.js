@@ -22,7 +22,8 @@ export default function Home() {
   const [pdfFile, setPdfFile] = useState(null);
   const [isParsing, setIsParsing] = useState(false);
   const [parsedData, setParsedData] = useState(null);
-  const [selectedPropertyIndex, setSelectedPropertyIndex] = useState(0); // 選択中の物件インデックス
+  const [bukakuResults, setBukakuResults] = useState([]); // 全物件の物確結果
+  const [currentBukakuIndex, setCurrentBukakuIndex] = useState(-1); // 現在物確中の物件インデックス
   const fileInputRef = useRef(null);
 
   // Notion連携用のstate
@@ -38,20 +39,20 @@ export default function Home() {
     };
   }, []);
 
-  // マイソクPDF解析
-  const handlePdfParse = async () => {
-    if (!pdfFile) {
-      setError('PDFファイルを選択してください');
-      return;
-    }
+  // PDFファイル選択時に自動で解析開始
+  const handlePdfSelect = async (file) => {
+    if (!file) return;
 
+    setPdfFile(file);
     setIsParsing(true);
     setError(null);
     setParsedData(null);
+    setBukakuResults([]);
+    setCurrentBukakuIndex(-1);
 
     try {
       const formData = new FormData();
-      formData.append('pdf', pdfFile);
+      formData.append('pdf', file);
 
       const response = await fetch(`${BACKEND_URL}/api/maisoku/parse`, {
         method: 'POST',
@@ -61,14 +62,8 @@ export default function Home() {
       const data = await response.json();
 
       if (data.success) {
-        // APIは配列を返す（複数物件対応）
         const properties = Array.isArray(data.data) ? data.data : [data.data];
         setParsedData(properties);
-        setSelectedPropertyIndex(0); // 最初の物件を選択状態に
-        // 物件名が取得できたら自動入力（最初の物件）
-        if (properties.length > 0 && properties[0].property_name) {
-          setPropertyName(properties[0].property_name);
-        }
       } else {
         setError(data.error || 'マイソク解析に失敗しました');
       }
@@ -79,9 +74,100 @@ export default function Home() {
     }
   };
 
+  // 単一物件の物確を実行（Promise返却）
+  const checkSingleProperty = (property, index) => {
+    return new Promise((resolve) => {
+      setCurrentBukakuIndex(index);
+      setStatusMessage(`${property.property_name || `物件${index + 1}`} を確認中...`);
+      setScreenshot(null);
+
+      fetch(`${BACKEND_URL}/api/bukaku/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          propertyName: property.property_name?.trim(),
+          checkAD,
+          platform: 'itandi',
+          managementCompany: property.management_company
+        })
+      })
+        .then(res => res.json())
+        .then(startData => {
+          if (!startData.success) {
+            resolve({ property, success: false, error: startData.error });
+            return;
+          }
+
+          const { sessionId } = startData;
+          const ws = new WebSocket(WS_URL);
+
+          ws.onopen = () => {
+            ws.send(JSON.stringify({ type: 'start_bukaku', sessionId }));
+          };
+
+          ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'status') {
+              setStatusMessage(`[${index + 1}/${parsedData.length}] ${data.message}`);
+            } else if (data.type === 'screenshot') {
+              setScreenshot(data.image);
+            } else if (data.type === 'result') {
+              ws.close();
+              resolve({ property, success: data.success, results: data.results || [], error: data.error });
+            } else if (data.type === 'error') {
+              ws.close();
+              resolve({ property, success: false, error: data.message });
+            }
+          };
+
+          ws.onerror = () => {
+            resolve({ property, success: false, error: 'WebSocket接続エラー' });
+          };
+        })
+        .catch(err => {
+          resolve({ property, success: false, error: err.message });
+        });
+    });
+  };
+
+  // 全物件を順次物確
+  const handleBukakuAll = async () => {
+    if (!parsedData || parsedData.length === 0) {
+      setError('物件情報がありません');
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+    setResults(null);
+    setBukakuResults([]);
+    setScreenshot(null);
+
+    const allResults = [];
+
+    for (let i = 0; i < parsedData.length; i++) {
+      const property = parsedData[i];
+      if (!property.property_name?.trim()) continue;
+
+      const result = await checkSingleProperty(property, i);
+      allResults.push(result);
+      setBukakuResults([...allResults]);
+    }
+
+    setIsLoading(false);
+    setCurrentBukakuIndex(-1);
+    setStatusMessage('');
+    setScreenshot(null);
+  };
+
+  // 旧handleBukaku（互換性のため残す）
   const handleBukaku = async () => {
-    // 選択された物件を取得
-    const selectedProperty = parsedData?.[selectedPropertyIndex];
+    handleBukakuAll();
+  };
+
+  // WebSocket接続用（旧コード - 削除予定）
+  const handleBukakuLegacy = async () => {
+    const selectedProperty = parsedData?.[0];
     const propertyNameToSearch = selectedProperty?.property_name || propertyName;
     if (!propertyNameToSearch?.trim()) {
       setError('マイソクを解析して物件名を抽出してください');
@@ -95,7 +181,6 @@ export default function Home() {
     setStatusMessage('セッションを開始中...');
 
     try {
-      // 1. セッションを開始
       const startResponse = await fetch(`${BACKEND_URL}/api/bukaku/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -237,26 +322,33 @@ export default function Home() {
       </header>
 
       <main style={styles.main}>
-        {/* マイソク解析セクション */}
+        {/* マイソクアップロード */}
         <section style={styles.section}>
-          <h2 style={styles.sectionTitle}>マイソク解析</h2>
+          <h2 style={styles.sectionTitle}>マイソクをアップロード</h2>
           <p style={styles.description}>
-            マイソク（物件資料PDF）をアップロードすると、AIが物件情報を自動抽出します
+            PDFをアップロードすると自動で解析し、全物件の空室確認を行います
           </p>
 
           <div style={styles.uploadArea}>
             <input
               type="file"
               accept="application/pdf"
-              onChange={(e) => setPdfFile(e.target.files[0])}
+              onChange={(e) => handlePdfSelect(e.target.files[0])}
               ref={fileInputRef}
               style={{ display: 'none' }}
+              disabled={isParsing || isLoading}
             />
             <div
-              onClick={() => fileInputRef.current?.click()}
-              style={styles.dropZone}
+              onClick={() => !isParsing && !isLoading && fileInputRef.current?.click()}
+              style={{
+                ...styles.dropZone,
+                opacity: (isParsing || isLoading) ? 0.6 : 1,
+                cursor: (isParsing || isLoading) ? 'not-allowed' : 'pointer'
+              }}
             >
-              {pdfFile ? (
+              {isParsing ? (
+                <p>解析中...</p>
+              ) : pdfFile ? (
                 <p>{pdfFile.name}</p>
               ) : (
                 <p>クリックしてPDFを選択</p>
@@ -264,128 +356,75 @@ export default function Home() {
             </div>
           </div>
 
-          <button
-            onClick={handlePdfParse}
-            disabled={isParsing || !pdfFile}
-            style={{
-              ...styles.button,
-              backgroundColor: '#3b82f6',
-              opacity: (isParsing || !pdfFile) ? 0.6 : 1,
-              cursor: (isParsing || !pdfFile) ? 'not-allowed' : 'pointer'
-            }}
-          >
-            {isParsing ? '解析中...' : 'マイソクを解析'}
-          </button>
-
           {/* 解析結果表示 */}
           {parsedData && parsedData.length > 0 && (
             <div style={styles.parsedDataBox}>
               <h3 style={{ fontSize: 16, marginBottom: 12 }}>
-                抽出された物件情報 ({parsedData.length}件)
-                {parsedData.length > 1 && (
-                  <span style={{ fontSize: 12, fontWeight: 400, marginLeft: 8, color: '#6b7280' }}>
-                    - 物確する物件を選択
-                  </span>
-                )}
+                抽出された物件 ({parsedData.length}件)
               </h3>
-              {parsedData.map((property, index) => (
-                <div
-                  key={index}
-                  onClick={() => !isLoading && setSelectedPropertyIndex(index)}
-                  style={{
-                    marginBottom: index < parsedData.length - 1 ? '12px' : 0,
-                    padding: '12px',
-                    borderRadius: '6px',
-                    border: selectedPropertyIndex === index ? '2px solid #10b981' : '1px solid #d1d5db',
-                    backgroundColor: selectedPropertyIndex === index ? '#f0fdf4' : '#fff',
-                    cursor: isLoading ? 'not-allowed' : 'pointer',
-                    transition: 'all 0.15s ease'
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
-                    <input
-                      type="radio"
-                      name="selectedProperty"
-                      checked={selectedPropertyIndex === index}
-                      onChange={() => setSelectedPropertyIndex(index)}
-                      disabled={isLoading}
-                      style={{ marginRight: 8 }}
-                    />
-                    <span style={{ fontSize: 14, fontWeight: 600, color: selectedPropertyIndex === index ? '#166534' : '#374151' }}>
-                      {property.property_name || `物件 ${index + 1}`}
-                    </span>
+              {parsedData.map((property, index) => {
+                // 物確結果があれば取得
+                const bukakuResult = bukakuResults.find(r => r.property?.property_name === property.property_name);
+                const isChecking = currentBukakuIndex === index;
+
+                return (
+                  <div
+                    key={index}
+                    style={{
+                      marginBottom: index < parsedData.length - 1 ? '8px' : 0,
+                      padding: '10px 12px',
+                      borderRadius: '6px',
+                      border: isChecking ? '2px solid #3b82f6' : '1px solid #d1d5db',
+                      backgroundColor: bukakuResult?.success ? '#f0fdf4' : isChecking ? '#eff6ff' : '#fff',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: 14, fontWeight: 500 }}>
+                        {property.property_name || `物件 ${index + 1}`}
+                      </span>
+                      {isChecking && (
+                        <span style={{ fontSize: 12, color: '#3b82f6' }}>確認中...</span>
+                      )}
+                      {bukakuResult && (
+                        <span style={{
+                          fontSize: 12,
+                          color: bukakuResult.success ? '#10b981' : '#ef4444'
+                        }}>
+                          {bukakuResult.success ? `${bukakuResult.results?.length || 0}件` : 'エラー'}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 12, color: '#6b7280', marginTop: 4 }}>
+                      {property.rent} / {property.floor_plan || '-'}
+                    </div>
                   </div>
-                  <div style={styles.parsedGrid}>
-                    {property.address && (
-                      <div style={styles.parsedItem}>
-                        <span style={styles.parsedLabel}>住所</span>
-                        <span style={styles.parsedValue}>{property.address}</span>
-                      </div>
-                    )}
-                    {property.rent && (
-                      <div style={styles.parsedItem}>
-                        <span style={styles.parsedLabel}>賃料</span>
-                        <span style={styles.parsedValue}>{property.rent}</span>
-                      </div>
-                    )}
-                    {property.floor_plan && (
-                      <div style={styles.parsedItem}>
-                        <span style={styles.parsedLabel}>間取り</span>
-                        <span style={styles.parsedValue}>{property.floor_plan}</span>
-                      </div>
-                    )}
-                    {property.management_company && (
-                      <div style={styles.parsedItem}>
-                        <span style={styles.parsedLabel}>管理会社</span>
-                        <span style={styles.parsedValue}>{property.management_company}</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
 
-          {/* ADチェックと物確開始 */}
-          {parsedData && parsedData.length > 0 && (
-            <div style={{ marginTop: '20px' }}>
+          {/* 物確開始ボタン */}
+          {parsedData && parsedData.length > 0 && !isLoading && bukakuResults.length === 0 && (
+            <div style={{ marginTop: '16px' }}>
               <div style={styles.checkboxGroup}>
                 <label style={styles.checkboxLabel}>
                   <input
                     type="checkbox"
                     checked={checkAD}
                     onChange={(e) => setCheckAD(e.target.checked)}
-                    disabled={isLoading}
                   />
                   <span style={{ marginLeft: 8 }}>AD有りのみ表示</span>
                 </label>
               </div>
-
-              {isLoading ? (
-                <button
-                  onClick={handleCancel}
-                  style={{
-                    ...styles.button,
-                    backgroundColor: '#6b7280',
-                    marginTop: '12px'
-                  }}
-                >
-                  キャンセル
-                </button>
-              ) : (
-                <button
-                  onClick={handleBukaku}
-                  disabled={!parsedData?.[selectedPropertyIndex]?.property_name}
-                  style={{
-                    ...styles.button,
-                    marginTop: '12px',
-                    opacity: parsedData?.[selectedPropertyIndex]?.property_name ? 1 : 0.6,
-                    cursor: parsedData?.[selectedPropertyIndex]?.property_name ? 'pointer' : 'not-allowed'
-                  }}
-                >
-                  「{parsedData?.[selectedPropertyIndex]?.property_name || '物件'}」を物確
-                </button>
-              )}
+              <button
+                onClick={handleBukakuAll}
+                style={{
+                  ...styles.button,
+                  marginTop: '12px'
+                }}
+              >
+                全{parsedData.length}件を物確開始
+              </button>
             </div>
           )}
         </section>
@@ -426,60 +465,73 @@ export default function Home() {
           </div>
         )}
 
-        {/* 結果表示 */}
-        {results && (
+        {/* 物確結果表示 */}
+        {bukakuResults.length > 0 && (
           <section style={styles.section}>
-            <h2 style={styles.sectionTitle}>物確結果</h2>
+            <h2 style={styles.sectionTitle}>
+              物確結果
+              {!isLoading && (
+                <span style={{ fontSize: 14, fontWeight: 400, marginLeft: 8, color: '#6b7280' }}>
+                  ({bukakuResults.filter(r => r.success).length}/{bukakuResults.length}件完了)
+                </span>
+              )}
+            </h2>
 
-            <div style={styles.resultSummary}>
-              <span style={styles.badge}>
-                {results.platform.toUpperCase()}
-              </span>
-              <span>
-                {results.results.length}件の結果
-              </span>
-            </div>
-
-            {results.results.length === 0 ? (
-              <p style={{ color: '#6b7280' }}>該当する物件が見つかりませんでした</p>
-            ) : (
-              results.results.map((result, index) => (
-                <div key={index} style={styles.resultCard}>
-                  <div style={styles.resultHeader}>
-                    <span style={{
-                      ...styles.statusBadge,
-                      backgroundColor: result.status === 'available' ? '#10b981' :
-                        result.status === 'applied' ? '#f59e0b' : '#ef4444'
-                    }}>
-                      {result.status === 'available' ? '募集中' :
-                        result.status === 'applied' ? '申込あり' : '確認不可'}
+            {bukakuResults.map((bukaku, index) => (
+              <div key={index} style={{
+                ...styles.resultCard,
+                borderColor: bukaku.success ? '#10b981' : '#ef4444'
+              }}>
+                <div style={styles.resultHeader}>
+                  <span style={{ fontWeight: 600, fontSize: 15 }}>
+                    {bukaku.property?.property_name || `物件${index + 1}`}
+                  </span>
+                  {!bukaku.success && (
+                    <span style={{ ...styles.statusBadge, backgroundColor: '#ef4444' }}>
+                      エラー
                     </span>
-                  </div>
-
-                  <div style={styles.resultDetails}>
-                    <div style={styles.detailItem}>
-                      <span style={styles.detailLabel}>AD</span>
-                      <span style={styles.detailValue}>
-                        {result.has_ad ? '✓ あり' : '－ なし'}
-                      </span>
-                    </div>
-                    <div style={styles.detailItem}>
-                      <span style={styles.detailLabel}>内見</span>
-                      <span style={styles.detailValue}>
-                        {result.viewing_available ? '✓ 可' : '要確認'}
-                      </span>
-                    </div>
-                  </div>
-
-                  <details style={styles.rawText}>
-                    <summary>詳細情報</summary>
-                    <pre style={{ fontSize: 12, whiteSpace: 'pre-wrap' }}>
-                      {result.raw_text}
-                    </pre>
-                  </details>
+                  )}
                 </div>
-              ))
-            )}
+
+                {bukaku.success && bukaku.results?.length > 0 ? (
+                  bukaku.results.map((result, rIdx) => (
+                    <div key={rIdx} style={{
+                      padding: '8px',
+                      marginTop: '8px',
+                      backgroundColor: '#f9fafb',
+                      borderRadius: '4px'
+                    }}>
+                      <span style={{
+                        ...styles.statusBadge,
+                        backgroundColor: result.status === 'available' ? '#10b981' :
+                          result.status === 'applied' ? '#f59e0b' : '#ef4444'
+                      }}>
+                        {result.status === 'available' ? '募集中' :
+                          result.status === 'applied' ? '申込あり' : '確認不可'}
+                      </span>
+                      <div style={styles.resultDetails}>
+                        <div style={styles.detailItem}>
+                          <span style={styles.detailLabel}>AD</span>
+                          <span style={styles.detailValue}>
+                            {result.has_ad ? '✓ あり' : '－ なし'}
+                          </span>
+                        </div>
+                        <div style={styles.detailItem}>
+                          <span style={styles.detailLabel}>内見</span>
+                          <span style={styles.detailValue}>
+                            {result.viewing_available ? '✓ 可' : '要確認'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                ) : bukaku.success ? (
+                  <p style={{ color: '#6b7280', marginTop: 8 }}>該当なし</p>
+                ) : (
+                  <p style={{ color: '#ef4444', marginTop: 8 }}>{bukaku.error}</p>
+                )}
+              </div>
+            ))}
 
             {/* Notion記録ボタン */}
             <div style={{ marginTop: '20px' }}>
