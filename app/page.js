@@ -22,6 +22,7 @@ export default function Home() {
   const [pdfFile, setPdfFile] = useState(null);
   const [isParsing, setIsParsing] = useState(false);
   const [parsedData, setParsedData] = useState(null);
+  const [selectedPropertyIndex, setSelectedPropertyIndex] = useState(0); // 選択中の物件インデックス
   const fileInputRef = useRef(null);
 
   // Notion連携用のstate
@@ -60,9 +61,10 @@ export default function Home() {
       const data = await response.json();
 
       if (data.success) {
-        // APIは配列を返す（複数物件対応）。最初の物件を使用
+        // APIは配列を返す（複数物件対応）
         const properties = Array.isArray(data.data) ? data.data : [data.data];
         setParsedData(properties);
+        setSelectedPropertyIndex(0); // 最初の物件を選択状態に
         // 物件名が取得できたら自動入力（最初の物件）
         if (properties.length > 0 && properties[0].property_name) {
           setPropertyName(properties[0].property_name);
@@ -78,9 +80,9 @@ export default function Home() {
   };
 
   const handleBukaku = async () => {
-    // マイソクから物件名を取得（配列の最初の物件）、なければエラー
-    const firstProperty = parsedData?.[0];
-    const propertyNameToSearch = firstProperty?.property_name || propertyName;
+    // 選択された物件を取得
+    const selectedProperty = parsedData?.[selectedPropertyIndex];
+    const propertyNameToSearch = selectedProperty?.property_name || propertyName;
     if (!propertyNameToSearch?.trim()) {
       setError('マイソクを解析して物件名を抽出してください');
       return;
@@ -101,7 +103,7 @@ export default function Home() {
           propertyName: propertyNameToSearch.trim(),
           checkAD,
           platform: 'itandi',
-          managementCompany: firstProperty?.management_company
+          managementCompany: selectedProperty?.management_company
         })
       });
 
@@ -280,25 +282,40 @@ export default function Home() {
             <div style={styles.parsedDataBox}>
               <h3 style={{ fontSize: 16, marginBottom: 12 }}>
                 抽出された物件情報 ({parsedData.length}件)
+                {parsedData.length > 1 && (
+                  <span style={{ fontSize: 12, fontWeight: 400, marginLeft: 8, color: '#6b7280' }}>
+                    - 物確する物件を選択
+                  </span>
+                )}
               </h3>
               {parsedData.map((property, index) => (
-                <div key={index} style={{
-                  marginBottom: index < parsedData.length - 1 ? '16px' : 0,
-                  paddingBottom: index < parsedData.length - 1 ? '16px' : 0,
-                  borderBottom: index < parsedData.length - 1 ? '1px solid #86efac' : 'none'
-                }}>
-                  {parsedData.length > 1 && (
-                    <p style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, color: '#166534' }}>
-                      物件 {index + 1}
-                    </p>
-                  )}
+                <div
+                  key={index}
+                  onClick={() => !isLoading && setSelectedPropertyIndex(index)}
+                  style={{
+                    marginBottom: index < parsedData.length - 1 ? '12px' : 0,
+                    padding: '12px',
+                    borderRadius: '6px',
+                    border: selectedPropertyIndex === index ? '2px solid #10b981' : '1px solid #d1d5db',
+                    backgroundColor: selectedPropertyIndex === index ? '#f0fdf4' : '#fff',
+                    cursor: isLoading ? 'not-allowed' : 'pointer',
+                    transition: 'all 0.15s ease'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+                    <input
+                      type="radio"
+                      name="selectedProperty"
+                      checked={selectedPropertyIndex === index}
+                      onChange={() => setSelectedPropertyIndex(index)}
+                      disabled={isLoading}
+                      style={{ marginRight: 8 }}
+                    />
+                    <span style={{ fontSize: 14, fontWeight: 600, color: selectedPropertyIndex === index ? '#166534' : '#374151' }}>
+                      {property.property_name || `物件 ${index + 1}`}
+                    </span>
+                  </div>
                   <div style={styles.parsedGrid}>
-                    {property.property_name && (
-                      <div style={styles.parsedItem}>
-                        <span style={styles.parsedLabel}>物件名</span>
-                        <span style={styles.parsedValue}>{property.property_name}</span>
-                      </div>
-                    )}
                     {property.address && (
                       <div style={styles.parsedItem}>
                         <span style={styles.parsedLabel}>住所</span>
@@ -358,15 +375,15 @@ export default function Home() {
               ) : (
                 <button
                   onClick={handleBukaku}
-                  disabled={!parsedData?.[0]?.property_name}
+                  disabled={!parsedData?.[selectedPropertyIndex]?.property_name}
                   style={{
                     ...styles.button,
                     marginTop: '12px',
-                    opacity: parsedData?.[0]?.property_name ? 1 : 0.6,
-                    cursor: parsedData?.[0]?.property_name ? 'pointer' : 'not-allowed'
+                    opacity: parsedData?.[selectedPropertyIndex]?.property_name ? 1 : 0.6,
+                    cursor: parsedData?.[selectedPropertyIndex]?.property_name ? 'pointer' : 'not-allowed'
                   }}
                 >
-                  物確開始
+                  「{parsedData?.[selectedPropertyIndex]?.property_name || '物件'}」を物確
                 </button>
               )}
             </div>
