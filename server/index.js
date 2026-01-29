@@ -17,8 +17,9 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { Client } = require('@notionhq/client');
 
 // 並列検索・学習機能モジュール
-const { parallelSearch, searchOnPlatform } = require('./engine/parallel-searcher');
+const { parallelSearch, searchOnPlatform, searchMultipleOnPlatform } = require('./engine/parallel-searcher');
 const { getSearchStrategy, learnMapping, getStats } = require('./engine/company-mapper');
+const { groupByPlatform, getGroupSummary, createExecutionPlan, calculateEfficiency } = require('./engine/smart-scheduler');
 
 const app = express();
 
@@ -44,6 +45,102 @@ const wss = new WebSocketServer({ server });
 
 // アクティブなセッションを管理
 const sessions = new Map();
+
+/**
+ * 物確結果をNotionの「物確結果DB」に保存（内部関数）
+ * @param {Object} property - 物件情報
+ * @param {Array} results - 物確結果
+ * @param {string} platform - ヒットしたプラットフォーム
+ * @returns {Promise<boolean>} 保存成功/失敗
+ */
+async function saveBukakuResultToNotion(property, results, platform) {
+  if (!process.env.NOTION_TOKEN || !process.env.NOTION_DATABASE_ID) {
+    console.log('[Notion保存] 環境変数未設定のためスキップ');
+    return false;
+  }
+
+  try {
+    const notion = new Client({ auth: process.env.NOTION_TOKEN });
+    const databaseId = process.env.NOTION_DATABASE_ID;
+
+    const propertyName = property?.property_name || '不明';
+    const roomNumber = property?.room_number || '';
+    const displayTitle = roomNumber ? `${propertyName} / ${roomNumber}` : propertyName;
+
+    // プロパティ構築
+    const properties = {
+      '物件名': {
+        title: [{ text: { content: displayTitle } }]
+      },
+      '部屋番号': {
+        rich_text: [{ text: { content: roomNumber } }]
+      },
+      'ヒットプラットフォーム': {
+        rich_text: [{ text: { content: platform?.toUpperCase() || '不明' } }]
+      },
+      '確認日時': {
+        date: { start: new Date().toISOString() }
+      },
+      '確認サイト数': {
+        number: results?.length || 0
+      }
+    };
+
+    // ステータス設定
+    if (results && results.length > 0) {
+      const firstResult = results[0];
+      properties['空室状況'] = {
+        select: {
+          name: firstResult.status === 'available' ? '空室あり' :
+            firstResult.status === 'applied' ? '要電話確認' : '不明'
+        }
+      };
+      properties['内見可否'] = {
+        checkbox: firstResult.viewing_available || false
+      };
+    } else {
+      properties['空室状況'] = {
+        select: { name: '該当なし' }
+      };
+    }
+
+    // マイソクデータから追加情報
+    if (property) {
+      if (property.ad_info) {
+        properties['AD情報'] = {
+          rich_text: [{ text: { content: property.ad_info } }]
+        };
+      }
+      if (property.address) {
+        properties['住所'] = {
+          rich_text: [{ text: { content: property.address } }]
+        };
+      }
+      if (property.rent) {
+        const rentNumber = parseInt(property.rent.replace(/[^0-9]/g, ''), 10);
+        if (!isNaN(rentNumber)) {
+          properties['賓料'] = { number: rentNumber };
+        }
+      }
+      if (property.management_company) {
+        properties['管理会社'] = {
+          rich_text: [{ text: { content: property.management_company } }]
+        };
+      }
+    }
+
+    await notion.pages.create({
+      parent: { database_id: databaseId },
+      properties
+    });
+
+    console.log(`[Notion保存] 完了: ${displayTitle}`);
+    return true;
+  } catch (err) {
+    console.error('[Notion保存] エラー:', err.message);
+    return false;
+  }
+}
 
 // Middleware
 app.use(cors());
@@ -139,6 +236,28 @@ wss.on('connection', (ws) => {
           platforms: platforms || []
         });
       }
+
+      // スマート物確（複数物件を効率的にグルーピングして実行）
+      if (data.type === 'start_smart_bukaku') {
+        const { properties, checkAD } = data;
+
+        console.log('[WebSocket] start_smart_bukaku受信');
+        console.log('[WebSocket] 物件数:', properties?.length || 0);
+        if (properties?.length > 0) {
+          console.log('[WebSocket] 最初の物件:', properties[0]?.property_name, '管理会社:', properties[0]?.management_company);
+        }
+
+        if (!properties || properties.length === 0) {
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: '物件リストが必要です'
+          }));
+          return;
+        }
+
+        // スマート物確を実行
+        await executeSmartBukaku(ws, { properties, checkAD });
+      }
     } catch (error) {
       console.error('[WebSocket] メッセージ処理エラー:', error);
       ws.send(JSON.stringify({
@@ -199,7 +318,7 @@ async function executeBukaku(ws, session, sessionId) {
   });
 
   const context = await browser.newContext({
-    viewport: { width: 1280, height: 720 }
+    viewport: { width: 1920, height: 1080 }
   });
   const page = await context.newPage();
 
@@ -413,7 +532,7 @@ async function executeParallelBukaku(ws, options) {
     const batch = platformsToSearch.slice(i, i + batchSize);
     sendStatus(`バッチ ${Math.floor(i / batchSize) + 1}: ${batch.join(', ')} を検索中...`);
 
-    // 4ブラウザを同時起動
+    // 4ブラウザを同時起動（headlessモード、PC全画面viewport）
     const browsers = await Promise.all(
       batch.map(async (platformId, idx) => {
         const platform = credentials.platforms[platformId];
@@ -421,13 +540,9 @@ async function executeParallelBukaku(ws, options) {
 
         try {
           const browser = await chromium.launch({
-            headless: false,
-            args: [
-              `--window-position=${(idx % 2) * 640},${Math.floor(idx / 2) * 400 + 25}`,
-              '--window-size=640,400'
-            ]
+            headless: true
           });
-          const context = await browser.newContext({ viewport: { width: 620, height: 350 } });
+          const context = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
           const page = await context.newPage();
 
           return { platformId, platform, browser, page, context };
@@ -647,9 +762,9 @@ app.post('/api/bukaku/parallel', async (req, res) => {
   console.log(`[並列物確] 開始: ${propertyName}, 管理会社: ${managementCompany || '不明'}`);
 
   try {
-    // 検索戦略を決定
-    const strategy = getSearchStrategy(managementCompany);
-    console.log(`[並列物確] 戦略: ${strategy.strategy}, プラットフォーム: ${strategy.platforms.join(', ')}`);
+    // 検索戦略を決定（★ Notion DB参照）
+    const strategy = await getSearchStrategy(managementCompany);
+    console.log(`[並列物確] 戦略: ${strategy.strategy}, プラットフォーム: ${strategy.platforms.join(', ')} [${strategy.source}]`);
 
     // 並列検索を実行
     const searchResult = await parallelSearch(propertyName, {
@@ -692,21 +807,22 @@ app.post('/api/bukaku/parallel', async (req, res) => {
 
 /**
  * 検索戦略確認エンドポイント
- * 管理会社名から検索戦略（単一/並列）を判定
+ * 管理会社名から検索戦略（単一/並列）を判定（★ Notion DB参照）
  */
-app.post('/api/bukaku/strategy', (req, res) => {
+app.post('/api/bukaku/strategy', async (req, res) => {
   const { managementCompany } = req.body;
 
   try {
-    const strategy = getSearchStrategy(managementCompany);
-    console.log(`[戦略確認] 管理会社: ${managementCompany || '不明'} → ${strategy.strategy} (${strategy.platforms.join(', ')})`);
+    const strategy = await getSearchStrategy(managementCompany);
+    console.log(`[戦略確認] 管理会社: ${managementCompany || '不明'} → ${strategy.strategy} (${strategy.platforms.join(', ')}) [${strategy.source}]`);
 
     res.json({
       success: true,
       managementCompany: managementCompany || null,
       strategy: strategy.strategy,
       platforms: strategy.platforms,
-      platformCount: strategy.platforms.length
+      platformCount: strategy.platforms.length,
+      source: strategy.source
     });
   } catch (error) {
     res.status(500).json({
@@ -780,21 +896,34 @@ app.post('/api/maisoku/parse', upload.single('pdf'), async (req, res) => {
 
     console.log('[マイソク解析] ファイル受信:', req.file.originalname);
 
-    // PDFからテキストを抽出
-    const pdfData = await pdfParse(req.file.buffer);
-    const extractedText = pdfData.text;
-
-    console.log('[マイソク解析] テキスト抽出完了, 文字数:', extractedText.length);
-
-    // Claude APIでマイソクを解析
+    // Claude APIでマイソクを解析（Vision APIでPDF直接解析）
     const anthropic = new Anthropic({
       apiKey: process.env.ANTHROPIC_API_KEY
     });
 
-    const prompt = `以下は不動産のマイソク（物件資料）から抽出したテキストです。この情報から物件情報を構造化して抽出してください。
+    // PDFをBase64エンコード
+    const pdfBase64 = req.file.buffer.toString('base64');
+
+    const prompt = `このマイソク（不動産物件資料PDF）を詳細に解析して、物件情報を抽出してください。
+
+【最重要】管理会社の特定について：
+マイソクには必ず「管理会社」「元付業者」「貸主」の情報があります。
+- ページ下部や帯部分に会社名・ロゴ・電話番号がセットで記載されている
+- 「○○株式会社」「○○不動産」「○○アーバンコミュニティ」「○○エイジェント」「○○管理サービス」など
+- 取引態様が「貸主」「専任媒介」と記載されている場合、その会社が管理会社
+- 仲介会社（客付け側）ではなく、物件を管理している元付側の会社を特定すること
+- ロゴ画像に書かれた会社名も読み取ってください
+
+【AD情報（広告料）の読み取り】
+ADとは仲介手数料とは別に、成約時に仲介会社が受け取れるボーナス報酬です。
+- 以下のキーワードを探す: 「AD」「広告料」「広告宣伝費」「宣伝広告費」「業者報酬」「業務委託費」「紹介料」「リベート」
+- 記載例: 「AD100%」「AD1ヶ月」「広告料0.5ヶ月分」「広告宣伝費 賃料1ヶ月分」「AD50%（税別）」
+- ADの記載がある場合は具体的な値を抽出（例: "100%", "1ヶ月", "0.5ヶ月分", "賃料1ヶ月分"）
+- ADの記載が見つからない場合はnull
 
 抽出するフィールド:
 - property_name: 物件名（建物名）
+- room_number: 部屋番号（号室。例: "101", "302号室", "1F"）※複数物件の場合は各物件で抽出
 - address: 住所
 - rent: 賃料
 - management_fee: 管理費・共益費
@@ -805,19 +934,34 @@ app.post('/api/maisoku/parse', upload.single('pdf'), async (req, res) => {
 - building_type: 構造（RC、鉄骨など）
 - floors: 階数
 - built_year: 築年月
-- management_company: 管理会社名
+- management_company: 管理会社名（※必須。ロゴや帯部分から読み取る）
 - contact_phone: 連絡先電話番号
+- ad_info: AD情報（広告料）。記載がある場合は具体的な値（例: "100%", "1ヶ月"）、記載がない場合はnull
 
-JSONフォーマットで出力してください。不明な項目はnullとしてください。
-
-マイソクテキスト:
-${extractedText.substring(0, 8000)}`;
+複数の物件がある場合は、配列で返してください。
+JSONフォーマットのみで出力してください。不明な項目はnullとしてください。`;
 
     const message = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 1024,
+      max_tokens: 2048,
       messages: [
-        { role: 'user', content: prompt }
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              source: {
+                type: 'base64',
+                media_type: 'application/pdf',
+                data: pdfBase64
+              }
+            },
+            {
+              type: 'text',
+              text: prompt
+            }
+          ]
+        }
       ]
     });
 
@@ -826,8 +970,9 @@ ${extractedText.substring(0, 8000)}`;
     let parsedData;
 
     try {
-      // JSON部分を抽出（```json ... ``` または直接のJSON）
+      // JSON部分を抽出（```json ... ``` または直接のJSON、配列も対応）
       const jsonMatch = responseText.match(/```json\n?([\s\S]*?)\n?```/) ||
+        responseText.match(/\[[\s\S]*\]/) ||
         responseText.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         parsedData = JSON.parse(jsonMatch[1] || jsonMatch[0]);
@@ -839,12 +984,37 @@ ${extractedText.substring(0, 8000)}`;
       parsedData = { raw_response: responseText };
     }
 
-    console.log('[マイソク解析] 解析完了:', parsedData.property_name || '物件名不明');
+    // 配列でない場合は配列に変換
+    if (!Array.isArray(parsedData)) {
+      parsedData = [parsedData];
+    }
+
+    console.log('[マイソク解析] 解析完了:', parsedData.length + '件');
+    parsedData.forEach((p, i) => {
+      console.log(`  ${i + 1}. ${p.property_name || '不明'} / 管理: ${p.management_company || 'なし'} / AD: ${p.ad_info || 'なし'}`);
+    });
+
+    // ★ 修正点2: 各物件の管理会社でNotion DBを照会し、検索方針を事前に付与
+    console.log('[マイソク解析] Notion DBで管理会社を照合中...');
+    const enrichedData = await Promise.all(
+      parsedData.map(async (property) => {
+        const strategy = await getSearchStrategy(property.management_company);
+        console.log(`  → ${property.management_company || '不明'}: ${strategy.strategy} (${strategy.platforms.slice(0, 2).join(', ')}) [${strategy.source}]`);
+        return {
+          ...property,
+          search_strategy: {
+            type: strategy.strategy,  // 'single' or 'parallel'
+            platforms: strategy.platforms,
+            source: strategy.source,  // 'notion', 'local_known', 'not_found'
+            confidence: strategy.confidence || null
+          }
+        };
+      })
+    );
 
     res.json({
       success: true,
-      data: parsedData,
-      raw_text_length: extractedText.length
+      data: enrichedData
     });
 
   } catch (error) {
@@ -862,7 +1032,7 @@ ${extractedText.substring(0, 8000)}`;
  */
 app.post('/api/notion/record', async (req, res) => {
   try {
-    const { propertyName, results, platform, parsedData, managementCompany } = req.body;
+    const { propertyName, results, platform, parsedData, managementCompany, roomNumber } = req.body;
 
     // 管理会社とプラットフォームの組み合わせを学習
     const companyName = managementCompany || parsedData?.management_company;
@@ -889,9 +1059,14 @@ app.post('/api/notion/record', async (req, res) => {
 
     // 結果をまとめて1つのページとして記録
     // プロパティ名はNotionの物確結果DBに合わせる
+    // タイトルは「物件名 / 部屋番号」形式（部屋番号がある場合）
+    const displayTitle = roomNumber ? `${propertyName || '不明'} / ${roomNumber}` : (propertyName || '不明');
     const properties = {
       '物件名': {
-        title: [{ text: { content: propertyName || '不明' } }]
+        title: [{ text: { content: displayTitle } }]
+      },
+      '部屋番号': {
+        rich_text: [{ text: { content: roomNumber || '' } }]
       },
       'ヒットプラットフォーム': {
         rich_text: [{ text: { content: platform?.toUpperCase() || 'ITANDI' } }]
@@ -903,6 +1078,9 @@ app.post('/api/notion/record', async (req, res) => {
         number: results?.length || 0
       }
     };
+
+    // マイソクデータを先に取得（配列の場合は最初の要素を使用）
+    const maisokuData = Array.isArray(parsedData) ? parsedData[0] : parsedData;
 
     // 最初の結果からステータスを取得
     if (results && results.length > 0) {
@@ -916,17 +1094,18 @@ app.post('/api/notion/record', async (req, res) => {
         }
       };
 
-      properties['AD有無'] = {
-        checkbox: firstResult.has_ad || false
-      };
-
       properties['内見可否'] = {
         checkbox: firstResult.viewing_available || false
       };
     }
 
-    // マイソクデータがあれば追加（配列の場合は最初の要素を使用）
-    const maisokuData = Array.isArray(parsedData) ? parsedData[0] : parsedData;
+    // AD情報：マイソクから抽出した値を使用（"100%", "1ヶ月" など）
+    const adInfo = maisokuData?.ad_info || null;
+    if (adInfo) {
+      properties['AD情報'] = {
+        rich_text: [{ text: { content: adInfo } }]
+      };
+    }
     if (maisokuData) {
       if (maisokuData.address) {
         properties['住所'] = {
@@ -1008,12 +1187,13 @@ app.post('/api/notion/setup', async (req, res) => {
             ]
           }
         },
-        'AD有り': { checkbox: {} },
-        '内見可': { checkbox: {} },
+        'AD情報': { rich_text: {} },
+        '部屋番号': { rich_text: {} },
+        '内見可否': { checkbox: {} },
         '確認日時': { date: {} },
-        '結果件数': { number: {} },
+        '確認サイト数': { number: {} },
         '住所': { rich_text: {} },
-        '賃料': { rich_text: {} },
+        '賓料': { number: { format: 'yen' } },
         '管理会社': { rich_text: {} }
       }
     });
@@ -1203,6 +1383,283 @@ app.delete('/api/companies/:name', (req, res) => {
     });
   }
 });
+
+/**
+ * スマート物確を実行（複数物件を効率的にグルーピングして処理）
+ */
+async function executeSmartBukaku(ws, options) {
+  const { properties, checkAD } = options;
+
+  const sendStatus = (message) => {
+    ws.send(JSON.stringify({ type: 'status', message }));
+  };
+
+  const sendProgress = (platform, current, total, detail) => {
+    ws.send(JSON.stringify({
+      type: 'progress',
+      platform,
+      current,
+      total,
+      detail
+    }));
+  };
+
+  console.log(`[スマート物確] ========== 処理開始 ==========`);
+  console.log(`[スマート物確] 物件数: ${properties.length}件`);
+  properties.forEach((p, i) => {
+    console.log(`[スマート物確]   ${i+1}. ${p.property_name || '名前なし'} / 管理: ${p.management_company || 'なし'}`);
+  });
+  sendStatus(`${properties.length}件の物件を分析中...Notion DBを確認しています`);
+
+  // 1. グルーピング（★ Notion DBを参照）
+  console.log(`[スマート物確] Notion DBで管理会社を検索中...`);
+  const groups = await groupByPlatform(properties);
+  const summary = getGroupSummary(groups);
+  const plan = createExecutionPlan(groups);
+  const efficiency = calculateEfficiency(plan);
+
+  console.log(`[スマート物確] グルーピング完了:`);
+  console.log(`[スマート物確]   既知: ${summary.known}件`, Object.entries(summary.platforms || {}).map(([k,v]) => `${k}:${v}`).join(', '));
+  console.log(`[スマート物確]   不明: ${summary.unknown}件`);
+  console.log(`[スマート物確] 効率: ${efficiency.description}`);
+
+  // グルーピング結果を送信
+  ws.send(JSON.stringify({
+    type: 'grouping_result',
+    summary,
+    plan: plan.map(p => ({ type: p.type, platform: p.platform, count: p.count, description: p.description })),
+    efficiency
+  }));
+
+  const allResults = [];
+  let processedCount = 0;
+  const totalCount = properties.length;
+
+  // 2. プラットフォーム確定グループを連続検索
+  console.log(`[スマート物確] ========== バッチ検索開始 ==========`);
+  console.log(`[スマート物確] 既知プラットフォーム数: ${Object.keys(groups.known).length}`);
+
+  for (const [platformId, props] of Object.entries(groups.known)) {
+    console.log(`[スマート物確] ${platformId}で${props.length}件を検索開始`);
+    sendStatus(`${platformId}で${props.length}件を連続検索中...`);
+
+    const results = await searchMultipleOnPlatform(platformId, props, {
+      onStatus: (id, status, message) => {
+        sendStatus(message);
+      },
+      onScreenshot: (screenshot) => {
+        console.log(`[スマート物確] バッチ検索スクリーンショット送信: ${screenshot.platformId}`);
+        ws.send(JSON.stringify({
+          type: 'screenshot',
+          image: screenshot.image,
+          platformId: screenshot.platformId
+        }));
+      },
+      onResult: async (result) => {
+        processedCount++;
+        sendProgress(platformId, processedCount, totalCount, {
+          propertyName: result.property?.property_name,
+          found: result.found
+        });
+
+        // Notionに保存
+        const notionSaved = await saveBukakuResultToNotion(
+          result.property,
+          result.results || [],
+          result.platform || platformId
+        );
+
+        // 結果をリアルタイム送信
+        ws.send(JSON.stringify({
+          type: 'property_result',
+          property: result.property,
+          platform: result.platform,
+          found: result.found,
+          results: result.results,
+          error: result.error,
+          notionSaved
+        }));
+
+        // ヒット時は学習
+        if (result.found && result.property?.management_company) {
+          learnMapping(result.property.management_company, platformId);
+        }
+      }
+    });
+
+    allResults.push(...results);
+  }
+
+  // 3. 不明グループを並列検索
+  console.log(`[スマート物確] ========== 並列検索開始 ==========`);
+  console.log(`[スマート物確] 不明物件数: ${groups.unknown.length}件`);
+
+  const { chromium } = require('playwright');
+  const { credentials, platformSkills, performLogin, performSearch } = require('./engine/parallel-searcher');
+
+  for (const prop of groups.unknown) {
+    const propertyName = prop.property_name || '不明';
+    console.log(`[スマート物確] 並列検索: ${propertyName}`);
+    sendStatus(`${propertyName}を全プラットフォームで検索中...`);
+
+    const platforms = credentials.priority.slice(0, 4); // 最初の4つで並列検索
+    const browsers = [];
+
+    // 4ブラウザ起動
+    for (let i = 0; i < platforms.length; i++) {
+      const platformId = platforms[i];
+      const platform = credentials.platforms[platformId];
+      if (!platform) continue;
+
+      try {
+        const browser = await chromium.launch({ headless: true });
+        const context = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
+        const page = await context.newPage();
+        browsers.push({ platformId, platform, browser, page });
+      } catch (e) {
+        console.error(`[スマート物確] ${platformId} ブラウザ起動失敗:`, e.message);
+      }
+    }
+
+    // スクリーンショット定期送信
+    const screenshotInterval = setInterval(async () => {
+      try {
+        const screenshots = await Promise.all(
+          browsers.map(async (b, idx) => {
+            if (!b.page) return null;
+            try {
+              const buffer = await b.page.screenshot({ type: 'jpeg', quality: 40 });
+              return {
+                position: idx,
+                platformId: b.platformId,
+                image: `data:image/jpeg;base64,${buffer.toString('base64')}`
+              };
+            } catch (e) {
+              return null;
+            }
+          })
+        );
+        const valid = screenshots.filter(s => s !== null);
+        if (valid.length > 0) {
+          console.log(`[スマート物確] スクリーンショット送信: ${valid.length}枚`);
+          ws.send(JSON.stringify({ type: 'screenshots', images: valid }));
+        }
+      } catch (e) {
+        console.error('[スマート物確] スクリーンショット送信エラー:', e.message);
+      }
+    }, 500);
+
+    // 並列検索実行（ログイン→検索を正しく実行）
+    const parallelResults = await Promise.allSettled(
+      browsers.map(async (b) => {
+        try {
+          console.log(`[${b.platformId}] ログインURL: ${b.platform.loginUrl}`);
+          await b.page.goto(b.platform.loginUrl, { waitUntil: 'networkidle', timeout: 60000 }).catch(() => {});
+          await b.page.waitForTimeout(2000);
+
+          // 正しくログイン処理を実行
+          const loginSuccess = await performLogin(b.page, b.platformId, b.platform);
+          console.log(`[${b.platformId}] ログイン結果: ${loginSuccess ? '成功' : '失敗'}`);
+
+          if (!loginSuccess) {
+            return {
+              platformId: b.platformId,
+              platform: b.platform.name,
+              found: false,
+              error: 'ログイン失敗',
+              results: []
+            };
+          }
+
+          // 検索実行
+          const searchResult = await performSearch(b.page, b.platformId, propertyName);
+          console.log(`[${b.platformId}] 検索結果: ${searchResult.found ? 'ヒット' : '該当なし'}`);
+
+          return {
+            platformId: b.platformId,
+            platform: b.platform.name,
+            found: searchResult.found,
+            results: searchResult.results || []
+          };
+        } catch (e) {
+          console.error(`[${b.platformId}] 並列検索エラー:`, e.message);
+          return {
+            platformId: b.platformId,
+            platform: b.platform?.name || b.platformId,
+            found: false,
+            error: e.message,
+            results: []
+          };
+        }
+      })
+    );
+
+    clearInterval(screenshotInterval);
+
+    // ブラウザ閉じる
+    for (const b of browsers) {
+      await b.browser?.close().catch(() => {});
+    }
+
+    // 結果処理
+    const hits = parallelResults
+      .filter(r => r.status === 'fulfilled' && r.value.found)
+      .map(r => r.value);
+
+    processedCount++;
+    sendProgress('並列検索', processedCount, totalCount, {
+      propertyName,
+      found: hits.length > 0
+    });
+
+    allResults.push({
+      property: prop,
+      found: hits.length > 0,
+      hits,
+      searchType: 'parallel'
+    });
+
+    // Notionに保存
+    const hitPlatforms = hits.map(h => h.platformId).join(', ') || '並列検索';
+    const allResults_flat = hits.flatMap(h => h.results || []);
+    const notionSaved = await saveBukakuResultToNotion(
+      prop,
+      allResults_flat,
+      hitPlatforms
+    );
+
+    ws.send(JSON.stringify({
+      type: 'property_result',
+      property: prop,
+      found: hits.length > 0,
+      hits,
+      searchType: 'parallel',
+      notionSaved
+    }));
+
+    // ヒット時は学習
+    if (hits.length > 0 && prop.management_company) {
+      learnMapping(prop.management_company, hits[0].platformId);
+    }
+  }
+
+  // 4. 完了
+  sendStatus('物確完了');
+  ws.send(JSON.stringify({
+    type: 'smart_bukaku_complete',
+    success: true,
+    totalProperties: properties.length,
+    results: allResults,
+    summary: {
+      total: allResults.length,
+      found: allResults.filter(r => r.found).length,
+      notFound: allResults.filter(r => !r.found).length
+    },
+    efficiency
+  }));
+
+  console.log(`[スマート物確] 完了: ${allResults.filter(r => r.found).length}/${allResults.length}件ヒット`);
+}
 
 // サーバー起動
 server.listen(PORT, () => {

@@ -1,13 +1,5 @@
 {
-  "description": "管理会社とプラットフォームの対応表。物確でヒットした実績を元に学習・更新される。",
-  "updated_at": "2025-01-19T00:00:00Z",
-  "mappings": {
-    "例: 株式会社ABC不動産": {
-      "platforms": ["itandi"],
-      "hit_count": 1,
-      "last_hit": "2025-01-19"
-    }
-  },
+  "description": "自社プラットフォームを持つ管理会社の固定マスタ。学習データはNotionに一本化。",
   "known_companies": {
     "生和コーポレーション": {
       "platforms": ["seiwa"],
@@ -16,10 +8,6 @@
     "大東建託": {
       "platforms": ["daitoservice"],
       "note": "大東建託ポータル専用"
-    },
-    "日本財託": {
-      "platforms": ["zaitaku"],
-      "note": "日本財宅管理サービス専用"
     },
     "グッドワークス": {
       "platforms": ["goodworks"],
