@@ -3,8 +3,9 @@
  * WebSocket対応版 - リアルタイムプレビュー機能付き
  */
 
-// 環境変数を読み込み
-require('dotenv').config();
+// 環境変数を読み込み（プロジェクトルートの.envを明示的に指定）
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 
 const express = require('express');
 const cors = require('cors');
@@ -20,6 +21,7 @@ const { Client } = require('@notionhq/client');
 const { parallelSearch, searchOnPlatform, searchMultipleOnPlatform } = require('./engine/parallel-searcher');
 const { getSearchStrategy, learnMapping, getStats } = require('./engine/company-mapper');
 const { groupByPlatform, getGroupSummary, createExecutionPlan, calculateEfficiency } = require('./engine/smart-scheduler');
+const { BukakuPipeline } = require('./engine/bukaku-pipeline');
 
 const app = express();
 
@@ -257,6 +259,32 @@ wss.on('connection', (ws) => {
 
         // スマート物確を実行
         await executeSmartBukaku(ws, { properties, checkAD });
+      }
+
+      // パイプライン物確（大容量PDF対応）
+      if (data.type === 'start_pipeline_bukaku') {
+        const { pdfBase64 } = data;
+
+        console.log('[WebSocket] start_pipeline_bukaku受信');
+
+        if (!pdfBase64) {
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: 'PDFデータが必要です'
+          }));
+          return;
+        }
+
+        // パイプライン物確を実行
+        await executePipelineBukaku(ws, pdfBase64);
+      }
+
+      // パイプラインキャンセル
+      if (data.type === 'cancel_pipeline') {
+        console.log('[WebSocket] cancel_pipeline受信');
+        if (ws.pipeline) {
+          ws.pipeline.cancel();
+        }
       }
     } catch (error) {
       console.error('[WebSocket] メッセージ処理エラー:', error);
@@ -1383,6 +1411,133 @@ app.delete('/api/companies/:name', (req, res) => {
     });
   }
 });
+
+/**
+ * パイプライン物確を実行（大容量PDF対応）
+ * 解析と物確を並行して実行
+ */
+async function executePipelineBukaku(ws, pdfBase64) {
+  console.log('[パイプライン物確] 開始');
+
+  const pdfBuffer = Buffer.from(pdfBase64, 'base64');
+  const pipeline = new BukakuPipeline({
+    batchSize: 5,
+    batchWaitTime: 2000
+  });
+
+  // WebSocketにパイプラインを保存（キャンセル用）
+  ws.pipeline = pipeline;
+
+  // イベントリスナー設定
+  pipeline.on('parsing_progress', ({ parsed, total }) => {
+    ws.send(JSON.stringify({
+      type: 'parsing_progress',
+      parsed,
+      total
+    }));
+  });
+
+  pipeline.on('property_parsed', (property) => {
+    ws.send(JSON.stringify({
+      type: 'property_parsed',
+      property
+    }));
+  });
+
+  pipeline.on('parsing_complete', (stats) => {
+    ws.send(JSON.stringify({
+      type: 'parsing_complete',
+      totalPages: stats.totalPages,
+      totalProperties: stats.totalProperties,
+      failedPages: stats.failedPages
+    }));
+  });
+
+  pipeline.on('bukaku_progress', ({ completed, total, found }) => {
+    ws.send(JSON.stringify({
+      type: 'bukaku_progress',
+      completed,
+      total,
+      found
+    }));
+  });
+
+  pipeline.on('bukaku_result', (result) => {
+    // Notionに保存
+    saveBukakuResultToNotion(
+      result.property,
+      result.hits?.flatMap(h => h.results) || result.results || [],
+      result.platformId
+    ).then(saved => {
+      // 学習（成功時）
+      if (result.found && result.property?.management_company) {
+        learnMapping(result.property.management_company, result.platformId);
+      }
+    });
+
+    ws.send(JSON.stringify({
+      type: 'property_result',
+      property: result.property,
+      found: result.found,
+      platform: result.platformId,
+      results: result.hits?.flatMap(h => h.results) || result.results || [],
+      searchType: result.strategy,
+      error: result.error
+    }));
+  });
+
+  pipeline.on('screenshot', ({ image, platformId }) => {
+    ws.send(JSON.stringify({
+      type: 'screenshot',
+      image,
+      platformId
+    }));
+  });
+
+  pipeline.on('screenshots', (images) => {
+    ws.send(JSON.stringify({
+      type: 'screenshots',
+      images
+    }));
+  });
+
+  pipeline.on('error', ({ phase, error }) => {
+    ws.send(JSON.stringify({
+      type: 'error',
+      message: `${phase}フェーズでエラー: ${error}`
+    }));
+  });
+
+  pipeline.on('cancelled', () => {
+    ws.send(JSON.stringify({
+      type: 'pipeline_cancelled'
+    }));
+  });
+
+  try {
+    // パイプライン実行
+    const stats = await pipeline.start(pdfBuffer, {
+      searchMultipleOnPlatform,
+      parallelSearch
+    });
+
+    ws.send(JSON.stringify({
+      type: 'pipeline_complete',
+      stats
+    }));
+
+  } catch (error) {
+    if (error.name !== 'AbortError') {
+      console.error('[パイプライン物確] エラー:', error);
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: error.message
+      }));
+    }
+  } finally {
+    delete ws.pipeline;
+  }
+}
 
 /**
  * スマート物確を実行（複数物件を効率的にグルーピングして処理）

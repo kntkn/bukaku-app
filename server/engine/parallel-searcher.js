@@ -283,6 +283,7 @@ function extractResultInfo(text, extraction) {
     raw_text: text.substring(0, 300),
     status: 'unknown',
     has_ad: false,
+    ad_info: null,
     viewing_available: false
   };
 
@@ -306,9 +307,33 @@ function extractResultInfo(text, extraction) {
     }
   }
 
-  const adPatterns = extraction?.adPatterns || ['広告費', 'AD'];
+  // AD情報を抽出（パターンマッチング）
+  const adPatterns = extraction?.adPatterns || ['広告費', 'AD', '広告料', '業者報酬'];
   if (adPatterns.some(p => text.includes(p))) {
     result.has_ad = true;
+
+    // AD金額を正規表現で抽出
+    // 例: "AD 100%", "AD1ヶ月", "広告費 50%", "広告料1.5ヶ月"
+    const adRegexPatterns = [
+      /(?:AD|広告費|広告料|業者報酬)[：:\s]*([0-9]+(?:\.[0-9]+)?[%％])/i,
+      /(?:AD|広告費|広告料|業者報酬)[：:\s]*([0-9]+(?:\.[0-9]+)?ヶ?月)/i,
+      /(?:AD|広告費|広告料|業者報酬)[：:\s]*([0-9]+万円?)/i,
+      /([0-9]+(?:\.[0-9]+)?[%％]).*(?:AD|広告)/i,
+      /([0-9]+(?:\.[0-9]+)?ヶ?月).*(?:AD|広告)/i
+    ];
+
+    for (const regex of adRegexPatterns) {
+      const match = text.match(regex);
+      if (match && match[1]) {
+        result.ad_info = match[1].trim();
+        break;
+      }
+    }
+
+    // マッチしなかった場合はhas_adがtrueなら「あり」と表示
+    if (!result.ad_info) {
+      result.ad_info = 'あり';
+    }
   }
 
   const viewingPatterns = extraction?.viewingPatterns || ['内見可', '即内見'];
