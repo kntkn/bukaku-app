@@ -1,0 +1,5 @@
+# Railway フロントエンド用 Nixpacks設定
+# バックエンドはDockerfileを使用するため、これはフロントエンドのみに適用
+
+[variables]
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = '1'

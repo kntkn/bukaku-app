@@ -144,8 +144,12 @@ async function saveBukakuResultToNotion(property, results, platform) {
 }
 
 // Middleware
-app.use(cors());
-app.use(express.json());
+const FRONTEND_URL = process.env.FRONTEND_URL || '*';
+app.use(cors({
+  origin: FRONTEND_URL === '*' ? true : FRONTEND_URL.split(','),
+  credentials: true
+}));
+app.use(express.json({ limit: '50mb' }));
 
 // Health check
 app.get('/', (req, res) => {

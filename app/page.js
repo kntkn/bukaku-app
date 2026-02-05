@@ -2,8 +2,8 @@
 
 import { useState, useRef, useEffect } from 'react';
 
-// バックエンドURL
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'https://bukaku-backend.onrender.com';
+// バックエンドURL（環境変数 NEXT_PUBLIC_BACKEND_URL で設定）
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
 const WS_URL = BACKEND_URL.replace('https://', 'wss://').replace('http://', 'ws://');
 
 export default function Home() {
