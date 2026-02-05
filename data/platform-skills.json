@@ -36,6 +36,8 @@
           "unavailable": ["成約済", "募集終了"]
         },
         "adPatterns": ["広告費", "AD"],
+        "adSelector": ".itandi-bb-ui__Flex.css-yj0ebl > span:first-child",
+        "adComment": "部屋行の最終カラム内、最初のspan=AD値（なし/100%等）",
         "viewingPatterns": ["内見可", "即内見"]
       }
     }
@@ -62,14 +64,16 @@
         { "action": "click", "selector": "button#freeBknSearch" },
         { "action": "wait", "ms": 5000 }
       ],
-      "resultSelector": ".property-list-item, .search-result-item, tr.property-row, .bukken-item, table tbody tr",
+      "resultSelector": "tbody.bkn-clickable-area",
       "resultExtraction": {
         "statusPatterns": {
           "available": ["募集中", "空室", "即入居可"],
           "applied": ["申込中", "申込あり", "商談中", "交渉中"],
           "unavailable": ["成約済", "成約", "募集終了", "終了"]
         },
-        "adPatterns": ["AD", "広告料", "業者報酬"],
+        "adPatterns": ["AD", "広告料", "広告費", "業者報酬"],
+        "adSelector": "td.bkn_info > div:nth-child(4) > p",
+        "adComment": "td.bkn_info内の4番目のdiv内のp要素。テキスト例:「広告費： 140％」「広告費： -」",
         "viewingPatterns": ["内見可", "即内見", "内覧可"]
       }
     }
@@ -147,6 +151,8 @@
           "unavailable": ["成約済", "成約", "終了"]
         },
         "adPatterns": ["AD", "広告料"],
+        "adSelector": "span.icn-ad2",
+        "adComment": "AD150/AD200等のバッジspan。テキスト例:AD150=150%=1.5ヶ月",
         "viewingPatterns": ["内見可"]
       }
     }
@@ -183,6 +189,8 @@
           "unavailable": ["成約済", "成約", "終了"]
         },
         "adPatterns": ["AD", "広告料"],
+        "adSelector": "span.icn-ad2",
+        "adComment": "goweb.work共通: AD150/AD200等のバッジspan",
         "viewingPatterns": ["内見可"]
       }
     }
@@ -219,6 +227,8 @@
           "unavailable": ["成約済", "成約", "終了"]
         },
         "adPatterns": ["AD", "広告料"],
+        "adSelector": "span.icn-ad2",
+        "adComment": "goweb.work共通: AD150/AD200等のバッジspan",
         "viewingPatterns": ["内見可"]
       }
     }
@@ -253,6 +263,8 @@
           "unavailable": ["成約済", "成約", "終了"]
         },
         "adPatterns": ["AD", "広告料"],
+        "adSelector": "td.AD > div:nth-child(2)",
+        "adComment": "bukkaku.jp共通: table#roomListのtd.AD内、2番目のdiv=AD割合(100%等)",
         "viewingPatterns": ["内見可"]
       }
     }
@@ -287,6 +299,8 @@
           "unavailable": ["成約済", "成約", "終了"]
         },
         "adPatterns": ["AD", "広告料"],
+        "adSelector": "td.AD > div:nth-child(2)",
+        "adComment": "bukkaku.jp共通: table#roomListのtd.AD内、2番目のdiv=AD割合(100%等)",
         "viewingPatterns": ["内見可"]
       }
     }
@@ -342,6 +356,8 @@
           "unavailable": ["成約済", "成約", "終了"]
         },
         "adPatterns": ["AD", "広告料"],
+        "adSelector": null,
+        "adComment": "AD列なし: 入居申込システムのためAD情報非表示",
         "viewingPatterns": ["内見可"]
       }
     }
@@ -396,6 +412,8 @@
           "unavailable": ["成約済", "成約", "終了"]
         },
         "adPatterns": ["AD", "広告料"],
+        "adSelector": null,
+        "adComment": "AD列なし: 空室情報サイトでAD情報非表示",
         "viewingPatterns": ["内見可"]
       }
     }
@@ -447,12 +465,14 @@
       "resultSelector": "table tbody tr, .article-list tr",
       "resultExtraction": {
         "statusPatterns": {
-          "available": ["募集中", "空室", "入居可"],
-          "applied": ["申込中", "申込あり", "商談中"],
+          "available": ["募集中", "空室", "入居可", "空有"],
+          "applied": ["申込中", "申込あり", "申込有", "商談中"],
           "unavailable": ["成約済", "成約", "終了"]
         },
         "adPatterns": ["AD", "広告料"],
-        "viewingPatterns": ["内見可"]
+        "adSelector": "td:nth-child(10)",
+        "adComment": "テーブル10列目=広告料。テキスト例:「1ヶ月」「0.5ヶ月」「無し」",
+        "viewingPatterns": ["内見可", "内覧可"]
       }
     }
   }

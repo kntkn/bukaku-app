@@ -58,8 +58,33 @@ async function extractPage(pdfBuffer, pageNumber) {
   return Buffer.from(await singlePageDoc.save());
 }
 
+/**
+ * 複数のPDFを1つに結合
+ * @param {Buffer[]} pdfBuffers - PDFファイルのBuffer配列
+ * @returns {Promise<Buffer>} 結合されたPDFのBuffer
+ */
+async function mergePdfs(pdfBuffers) {
+  if (pdfBuffers.length === 1) return pdfBuffers[0];
+
+  const mergedDoc = await PDFDocument.create();
+
+  for (let i = 0; i < pdfBuffers.length; i++) {
+    const srcDoc = await PDFDocument.load(pdfBuffers[i]);
+    const pageCount = srcDoc.getPageCount();
+    const copiedPages = await mergedDoc.copyPages(srcDoc, Array.from({ length: pageCount }, (_, j) => j));
+    copiedPages.forEach(page => mergedDoc.addPage(page));
+    console.log(`[PDF結合] ${i + 1}/${pdfBuffers.length}ファイル (${pageCount}ページ)`);
+  }
+
+  const totalPages = mergedDoc.getPageCount();
+  console.log(`[PDF結合] 完了: 合計${totalPages}ページ`);
+
+  return Buffer.from(await mergedDoc.save());
+}
+
 module.exports = {
   splitPdfToPages,
   getPageCount,
-  extractPage
+  extractPage,
+  mergePdfs
 };

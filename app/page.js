@@ -39,6 +39,9 @@ export default function Home() {
   const [bukakuProgress, setBukakuProgress] = useState({ completed: 0, total: 0, found: 0 });
   const [parsedProperties, setParsedProperties] = useState([]); // 解析済み物件（リアルタイム更新）
 
+  // ドラッグ&ドロップ用のstate
+  const [isDragging, setIsDragging] = useState(false);
+
   // Notion連携用のstate
   const [isRecording, setIsRecording] = useState(false);
   const [notionResult, setNotionResult] = useState(null);
@@ -61,12 +64,15 @@ export default function Home() {
     { label: 'データを整理中', icon: '✨' }
   ];
 
-  // PDFファイル選択時に自動で解析開始（パイプラインモード）
-  const handlePdfSelect = async (file) => {
-    if (!file) return;
+  // PDFファイル選択時に自動で解析開始（パイプラインモード・複数PDF対応）
+  const handlePdfSelect = async (files) => {
+    const fileList = Array.isArray(files) ? files : Array.from(files);
+    const pdfFiles = fileList.filter(f => f.type === 'application/pdf');
+
+    if (pdfFiles.length === 0) return;
 
     // 状態リセット
-    setPdfFile(file);
+    setPdfFile(pdfFiles.length === 1 ? pdfFiles[0] : { name: `${pdfFiles.length}件のPDF` });
     setError(null);
     setParsedData(null);
     setBukakuResults([]);
@@ -79,44 +85,48 @@ export default function Home() {
     setIsPipelineMode(true);
     setIsLoading(true);
     setCurrentPhase('parsing');
-    setStatusMessage('パイプライン処理を開始中...');
+    setStatusMessage(pdfFiles.length > 1
+      ? `${pdfFiles.length}件のPDFを処理中...`
+      : 'パイプライン処理を開始中...'
+    );
 
-    // PDFをBase64に変換
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      const base64 = e.target.result.split(',')[1]; // data:application/pdf;base64, を除去
+    // 全PDFをBase64に変換
+    const readFile = (file) => new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => resolve(e.target.result.split(',')[1]);
+      reader.readAsDataURL(file);
+    });
 
-      // WebSocket接続してパイプライン開始
-      const ws = new WebSocket(WS_URL);
-      wsRef.current = ws;
+    const pdfBase64List = await Promise.all(pdfFiles.map(readFile));
 
-      ws.onopen = () => {
-        console.log('[Pipeline] WebSocket接続成功、PDF送信中...');
-        ws.send(JSON.stringify({
-          type: 'start_pipeline_bukaku',
-          pdfBase64: base64
-        }));
-        console.log('[Pipeline] PDF送信完了');
-      };
+    // WebSocket接続してパイプライン開始
+    const ws = new WebSocket(WS_URL);
+    wsRef.current = ws;
 
-      ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        handlePipelineMessage(data);
-      };
-
-      ws.onerror = () => {
-        setError('WebSocket接続エラーが発生しました');
-        setIsLoading(false);
-        setIsPipelineMode(false);
-        setCurrentPhase('idle');
-      };
-
-      ws.onclose = () => {
-        wsRef.current = null;
-      };
+    ws.onopen = () => {
+      console.log(`[Pipeline] WebSocket接続成功、${pdfBase64List.length}件のPDF送信中...`);
+      ws.send(JSON.stringify({
+        type: 'start_pipeline_bukaku',
+        pdfBase64List
+      }));
+      console.log('[Pipeline] PDF送信完了');
     };
 
-    reader.readAsDataURL(file);
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      handlePipelineMessage(data);
+    };
+
+    ws.onerror = () => {
+      setError('WebSocket接続エラーが発生しました');
+      setIsLoading(false);
+      setIsPipelineMode(false);
+      setCurrentPhase('idle');
+    };
+
+    ws.onclose = () => {
+      wsRef.current = null;
+    };
   };
 
   // パイプラインメッセージハンドラ
@@ -913,24 +923,52 @@ export default function Home() {
         <section style={styles.section}>
           <h2 style={styles.sectionTitle}>マイソクをアップロード</h2>
           <p style={styles.description}>
-            PDFをアップロードすると自動で解析し、全物件の空室確認を行います
+            PDFをアップロードすると自動で解析し、全物件の空室確認を行います（複数PDF対応）
           </p>
 
           <div style={styles.uploadArea}>
             <input
               type="file"
               accept="application/pdf"
-              onChange={(e) => handlePdfSelect(e.target.files[0])}
+              multiple
+              onChange={(e) => handlePdfSelect(e.target.files)}
               ref={fileInputRef}
               style={{ display: 'none' }}
               disabled={isParsing || isLoading}
             />
             <div
               onClick={() => !isParsing && !isLoading && fileInputRef.current?.click()}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (!isParsing && !isLoading) setIsDragging(true);
+              }}
+              onDragEnter={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (!isParsing && !isLoading) setIsDragging(true);
+              }}
+              onDragLeave={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsDragging(false);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsDragging(false);
+                if (!isParsing && !isLoading && e.dataTransfer.files.length > 0) {
+                  handlePdfSelect(e.dataTransfer.files);
+                }
+              }}
               style={{
                 ...styles.dropZone,
                 opacity: (isParsing || isLoading) ? 0.6 : 1,
-                cursor: (isParsing || isLoading) ? 'not-allowed' : 'pointer'
+                cursor: (isParsing || isLoading) ? 'not-allowed' : 'pointer',
+                borderColor: isDragging ? '#f97316' : undefined,
+                backgroundColor: isDragging ? '#fff7ed' : undefined,
+                transform: isDragging ? 'scale(1.01)' : undefined,
+                transition: 'all 0.2s ease'
               }}
             >
               {isParsing ? (
@@ -978,8 +1016,10 @@ export default function Home() {
                 </div>
               ) : pdfFile ? (
                 <p>{pdfFile.name}</p>
+              ) : isDragging ? (
+                <p style={{ color: '#f97316', fontWeight: 500 }}>ここにドロップ</p>
               ) : (
-                <p>クリックしてPDFを選択</p>
+                <p>クリックまたはドラッグ&ドロップでPDFを選択（複数可）</p>
               )}
             </div>
           </div>
@@ -1271,7 +1311,8 @@ export default function Home() {
               {displayResults.map((bukaku, index) => {
                 // ステータスを判定
                 const getStatusInfo = () => {
-                  if (!bukaku.success) return { label: 'エラー', color: '#ef4444', bgColor: '#fef2f2' };
+                  if (!bukaku.success && bukaku.error) return { label: 'エラー', color: '#ef4444', bgColor: '#fef2f2' };
+                  if (!bukaku.success && !bukaku.error) return { label: '要電話確認', color: '#d97706', bgColor: '#fffbeb' };
                   if (!bukaku.results || bukaku.results.length === 0) return { label: '該当なし', color: '#6b7280', bgColor: '#f3f4f6' };
                   const firstResult = bukaku.results[0];
                   if (firstResult.status === 'available') return { label: '募集中', color: '#166534', bgColor: '#dcfce7' };
@@ -1280,15 +1321,15 @@ export default function Home() {
                 };
                 const statusInfo = getStatusInfo();
 
-                // AD情報を取得
+                // AD情報を取得（ad_months = 正規化済み #.# 形式を優先）
                 const firstResult = bukaku.results?.[0];
-                const hasAD = firstResult?.has_ad || firstResult?.ad_info;
-                const adInfo = firstResult?.ad_info;
+                const hasAD = firstResult?.has_ad || firstResult?.ad_info || firstResult?.ad_months;
+                const adMonths = firstResult?.ad_months; // 正規化済み: "1.0", "2.0" など
 
                 return (
                   <div key={index} style={{
                     ...styles.resultCard,
-                    borderColor: bukaku.success ? '#10b981' : '#ef4444'
+                    borderColor: bukaku.success ? '#10b981' : bukaku.error ? '#ef4444' : '#f59e0b'
                   }}>
                     {/* タイトル: 物件名 / 部屋番号 */}
                     <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 8 }}>
@@ -1311,7 +1352,7 @@ export default function Home() {
                         {statusInfo.label}
                       </span>
 
-                      {/* AD情報ラベル */}
+                      {/* AD情報ラベル（ヶ月単位: AD#.# 形式） */}
                       {hasAD ? (
                         <span style={{
                           fontSize: 12,
@@ -1321,7 +1362,7 @@ export default function Home() {
                           color: '#166534',
                           fontWeight: 600
                         }}>
-                          💰 AD: {adInfo || 'あり'}
+                          {adMonths ? `AD${adMonths}` : 'AD情報あり'}
                         </span>
                       ) : (
                         <span style={{
@@ -1351,6 +1392,24 @@ export default function Home() {
                     {/* エラー時のメッセージ */}
                     {!bukaku.success && bukaku.error && (
                       <p style={{ color: '#ef4444', fontSize: 13, margin: 0 }}>{bukaku.error}</p>
+                    )}
+
+                    {/* 全サイト未発見 → 電話確認を促す */}
+                    {!bukaku.success && !bukaku.error && (
+                      <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        padding: '10px 14px',
+                        backgroundColor: '#fffbeb',
+                        borderRadius: 6,
+                        border: '1px solid #fde68a'
+                      }}>
+                        <span style={{ fontSize: 18 }}>📞</span>
+                        <p style={{ color: '#92400e', fontSize: 13, margin: 0 }}>
+                          全プラットフォームで該当物件が見つかりませんでした。管理会社へ電話で空室確認をしてください。
+                        </p>
+                      </div>
                     )}
                   </div>
                 );

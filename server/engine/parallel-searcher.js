@@ -16,6 +16,44 @@ const credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf-8'));
 const skillsPath = path.join(__dirname, '../../data/platform-skills.json');
 const platformSkills = JSON.parse(fs.readFileSync(skillsPath, 'utf-8'));
 
+/**
+ * AD値を月数に正規化
+ * 100% = 1.0ヶ月、50% = 0.5ヶ月、1ヶ月 = 1.0 など
+ * @param {string} rawAdValue - 生のAD値（"100%", "1ヶ月", "0.5ヶ月分" など）
+ * @returns {string|null} "#.#" 形式の月数文字列、正規化不可の場合はnull
+ */
+function normalizeAdToMonths(rawAdValue) {
+  if (!rawAdValue || rawAdValue === 'あり') return null;
+
+  const str = rawAdValue.trim();
+
+  // AD接頭辞付き数値: AD150 = 150% = 1.5ヶ月（goweb.work系サイト）
+  const adPrefixMatch = str.match(/AD\s*(\d+(?:\.\d+)?)/i);
+  if (adPrefixMatch) {
+    return (parseFloat(adPrefixMatch[1]) / 100).toFixed(1);
+  }
+
+  // パーセンテージ: 100% = 1.0ヶ月
+  const percentMatch = str.match(/([0-9]+(?:\.[0-9]+)?)\s*[%％]/);
+  if (percentMatch) {
+    return (parseFloat(percentMatch[1]) / 100).toFixed(1);
+  }
+
+  // 月数: 1ヶ月 = 1.0, 1.5ヶ月分 = 1.5
+  const monthMatch = str.match(/([0-9]+(?:\.[0-9]+)?)\s*ヶ?月/);
+  if (monthMatch) {
+    return parseFloat(monthMatch[1]).toFixed(1);
+  }
+
+  // 数字のみ（月数とみなす）
+  const numMatch = str.match(/^([0-9]+(?:\.[0-9]+)?)$/);
+  if (numMatch) {
+    return parseFloat(numMatch[1]).toFixed(1);
+  }
+
+  return null;
+}
+
 // ビューポート設定（PC全画面サイズ）
 const VIEWPORT_CONFIG = {
   width: 1920,
@@ -198,8 +236,11 @@ async function performLogin(page, platformId, platform) {
  * @param {string} platformId - プラットフォームID
  * @param {string} propertyName - 物件名
  * @param {string} roomNumber - 部屋番号（オプション）
+ * @param {Object} options - オプション
+ * @param {boolean} options.skipPreSteps - preStepsをスキップ（連続検索時）
  */
-async function performSearch(page, platformId, propertyName, roomNumber = '') {
+async function performSearch(page, platformId, propertyName, roomNumber = '', options = {}) {
+  const { skipPreSteps = false } = options;
   const skills = platformSkills[platformId];
   const platform = credentials.platforms[platformId];
   const creds = platform?.credentials || {};
@@ -230,9 +271,23 @@ async function performSearch(page, platformId, propertyName, roomNumber = '') {
   const searchTarget = roomNumber ? `${propertyName} (${roomNumber})` : propertyName;
   console.log(`[${platformId}] Executing search steps for: "${searchTarget}"`);
 
-  // preSteps（検索ページへの遷移など）
-  if (skills.search.preSteps) {
+  // preSteps（検索ページへの遷移など）- 連続検索時はスキップ
+  if (skills.search.preSteps && !skipPreSteps) {
     await executeSteps(page, skills.search.preSteps, creds, propertyName, roomNumber);
+  }
+
+  // 連続検索時は検索フォームをクリアしてから入力
+  if (skipPreSteps && skills.search.steps) {
+    // 検索フォームをクリア（入力フィールドを空にする）
+    try {
+      const inputSelector = skills.search.steps.find(s => s.action === 'fill')?.selector;
+      if (inputSelector) {
+        await page.fill(inputSelector, '');
+        await page.waitForTimeout(300);
+      }
+    } catch (e) {
+      // クリア失敗は無視
+    }
   }
 
   // メインの検索ステップ
@@ -264,7 +319,20 @@ async function extractResults(page, platformId, propertyName, extraction) {
 
       if (!cardText.includes(propertyName)) continue;
 
-      const result = extractResultInfo(cardText, extraction);
+      // AD専用セレクタがあれば、そのセレクタのテキストを取得
+      let adText = null;
+      if (extraction?.adSelector) {
+        try {
+          const adElement = await card.$(extraction.adSelector);
+          if (adElement) {
+            adText = await adElement.textContent();
+          }
+        } catch (e) {
+          // adSelector取得失敗はフルテキストにフォールバック
+        }
+      }
+
+      const result = extractResultInfo(cardText, extraction, adText);
       results.push(result);
     }
 
@@ -278,12 +346,18 @@ async function extractResults(page, platformId, propertyName, extraction) {
 /**
  * 結果情報を抽出
  */
-function extractResultInfo(text, extraction) {
+/**
+ * @param {string} text - カード全体のテキスト
+ * @param {Object} extraction - resultExtraction設定
+ * @param {string|null} adText - adSelectorで取得したAD専用テキスト（あれば優先）
+ */
+function extractResultInfo(text, extraction, adText = null) {
   const result = {
     raw_text: text.substring(0, 300),
     status: 'unknown',
     has_ad: false,
     ad_info: null,
+    ad_months: null,
     viewing_available: false
   };
 
@@ -297,7 +371,6 @@ function extractResultInfo(text, extraction) {
       result.status = 'unavailable';
     }
   } else {
-    // デフォルトパターン
     if (text.includes('募集中') || text.includes('空室')) {
       result.status = 'available';
     } else if (text.includes('申込') || text.includes('商談')) {
@@ -307,34 +380,46 @@ function extractResultInfo(text, extraction) {
     }
   }
 
-  // AD情報を抽出（パターンマッチング）
-  const adPatterns = extraction?.adPatterns || ['広告費', 'AD', '広告料', '業者報酬'];
-  if (adPatterns.some(p => text.includes(p))) {
-    result.has_ad = true;
+  // AD情報を抽出
+  // adSelector経由でテキスト取得済みの場合は直接処理（キーワード不要）
+  // そうでなければカード全体からキーワード検索
+  if (adText) {
+    const trimmed = adText.trim();
+    // 「無し」「-」「なし」は AD なし
+    if (trimmed && trimmed !== '-' && trimmed !== '無し' && trimmed !== 'なし') {
+      result.has_ad = true;
+      result.ad_info = trimmed;
+    }
+  } else {
+    const adPatterns = extraction?.adPatterns || ['広告費', 'AD', '広告料', '業者報酬'];
+    if (adPatterns.some(p => text.includes(p))) {
+      result.has_ad = true;
 
-    // AD金額を正規表現で抽出
-    // 例: "AD 100%", "AD1ヶ月", "広告費 50%", "広告料1.5ヶ月"
-    const adRegexPatterns = [
-      /(?:AD|広告費|広告料|業者報酬)[：:\s]*([0-9]+(?:\.[0-9]+)?[%％])/i,
-      /(?:AD|広告費|広告料|業者報酬)[：:\s]*([0-9]+(?:\.[0-9]+)?ヶ?月)/i,
-      /(?:AD|広告費|広告料|業者報酬)[：:\s]*([0-9]+万円?)/i,
-      /([0-9]+(?:\.[0-9]+)?[%％]).*(?:AD|広告)/i,
-      /([0-9]+(?:\.[0-9]+)?ヶ?月).*(?:AD|広告)/i
-    ];
+      const adRegexPatterns = [
+        /(?:AD|広告費|広告料|業者報酬)[：:\s]*([0-9]+(?:\.[0-9]+)?[%％])/i,
+        /(?:AD|広告費|広告料|業者報酬)[：:\s]*([0-9]+(?:\.[0-9]+)?ヶ?月)/i,
+        /(?:AD|広告費|広告料|業者報酬)[：:\s]*([0-9]+万円?)/i,
+        /(AD\d+(?:\.\d+)?)/i,  // goweb.work: "AD150" → "AD150"
+        /([0-9]+(?:\.[0-9]+)?[%％]).*(?:AD|広告)/i,
+        /([0-9]+(?:\.[0-9]+)?ヶ?月).*(?:AD|広告)/i
+      ];
 
-    for (const regex of adRegexPatterns) {
-      const match = text.match(regex);
-      if (match && match[1]) {
-        result.ad_info = match[1].trim();
-        break;
+      for (const regex of adRegexPatterns) {
+        const match = text.match(regex);
+        if (match && match[1]) {
+          result.ad_info = match[1].trim();
+          break;
+        }
+      }
+
+      if (!result.ad_info) {
+        result.ad_info = 'あり';
       }
     }
-
-    // マッチしなかった場合はhas_adがtrueなら「あり」と表示
-    if (!result.ad_info) {
-      result.ad_info = 'あり';
-    }
   }
+
+  // AD値を月数に正規化 (#.# 形式)
+  result.ad_months = normalizeAdToMonths(result.ad_info);
 
   const viewingPatterns = extraction?.viewingPatterns || ['内見可', '即内見'];
   if (viewingPatterns.some(p => text.includes(p))) {
@@ -507,58 +592,78 @@ async function searchOnPlatform(platformId, propertyName, onStatus, windowIndex 
 }
 
 /**
- * 全プラットフォームで並列検索（4つずつバッチ処理）
+ * 全プラットフォームで並列検索（4ワーカープール方式）
+ * 常に4つのブラウザが稼働し、1つ終わったら即座に次のサイトを開始
  */
 async function parallelSearch(propertyName, options = {}) {
   const {
     platforms = credentials.priority,
-    batchSize = 4,
+    concurrency = 4,
     onStatus = () => {},
-    onComplete = () => {}
+    onComplete = () => {},
+    onScreenshot = null
   } = options;
 
-  console.log(`[並列検索] 開始: "${propertyName}" (${platforms.length}プラットフォーム, ${batchSize}並列)`);
+  console.log(`[並列検索] 開始: "${propertyName}" (${platforms.length}プラットフォーム, ${concurrency}並列)`);
 
   const allHits = [];
   const allMisses = [];
   const allErrors = [];
 
-  for (let i = 0; i < platforms.length; i += batchSize) {
-    const batch = platforms.slice(i, i + batchSize);
-    const batchNum = Math.floor(i / batchSize) + 1;
-    const totalBatches = Math.ceil(platforms.length / batchSize);
+  // プラットフォームキュー（残りのサイト）
+  const queue = [...platforms];
+  let completedCount = 0;
+  let found = false;
 
-    console.log(`[並列検索] バッチ ${batchNum}/${totalBatches}: ${batch.join(', ')}`);
+  // ワーカー関数（1つのブラウザが担当）
+  const worker = async (workerIndex) => {
+    while (queue.length > 0 && !found) {
+      const platformId = queue.shift();
+      if (!platformId) break;
 
-    const searchPromises = batch.map((platformId, idx) =>
-      searchOnPlatform(platformId, propertyName, onStatus, idx)
-    );
+      const platform = credentials.platforms[platformId];
+      console.log(`[Worker${workerIndex}] ${platform?.name || platformId} 検索開始`);
 
-    const results = await Promise.allSettled(searchPromises);
+      try {
+        const result = await searchOnPlatform(platformId, propertyName, onStatus, workerIndex);
+        completedCount++;
 
-    for (const result of results) {
-      if (result.status === 'fulfilled') {
-        if (result.value.found) {
-          allHits.push(result.value);
+        if (result.found) {
+          allHits.push(result);
+          found = true;  // 見つかったらフラグを立てる（他のワーカーも終了へ）
+          console.log(`[Worker${workerIndex}] ヒット！ ${platform?.name}で発見`);
         } else {
-          allMisses.push(result.value);
+          allMisses.push(result);
+          console.log(`[Worker${workerIndex}] ${platform?.name}: 該当なし (${completedCount}/${platforms.length})`);
         }
-      } else {
-        allErrors.push({ error: result.reason?.message || 'Unknown error' });
+      } catch (error) {
+        completedCount++;
+        console.error(`[Worker${workerIndex}] ${platformId} エラー:`, error.message);
+        allErrors.push({ platformId, error: error.message });
       }
     }
+  };
 
-    if (allHits.length > 0 && options.stopOnFirstHit) {
-      console.log(`[並列検索] ヒット発見、検索終了`);
-      break;
-    }
+  // 4つのワーカーを同時起動
+  const workers = [];
+  for (let i = 0; i < Math.min(concurrency, platforms.length); i++) {
+    workers.push(worker(i));
   }
 
-  console.log(`[並列検索] 完了: ヒット=${allHits.length}, ミス=${allMisses.length}, エラー=${allErrors.length}`);
+  // 全ワーカーの完了を待つ
+  await Promise.all(workers);
+
+  const success = allHits.length > 0;
+  console.log(`[並列検索] 完了: ${success ? 'ヒット' : '該当なし'} (検索=${completedCount}/${platforms.length})`);
 
   onComplete({ hits: allHits, misses: allMisses, errors: allErrors });
 
-  return { hits: allHits, misses: allMisses, errors: allErrors };
+  return {
+    success,
+    hits: allHits,
+    misses: allMisses,
+    errors: allErrors
+  };
 }
 
 /**
@@ -641,7 +746,10 @@ async function searchMultipleOnPlatform(platformId, properties, options = {}) {
       onStatus?.(platformId, 'searching', `${platform.name}: ${searchTarget}を検索中 (${i + 1}/${properties.length})`);
 
       try {
-        const searchResult = await performSearch(page, platformId, propertyName, roomNumber);
+        // 2件目以降はpreStepsをスキップ（既に検索画面にいるため）
+        const searchResult = await performSearch(page, platformId, propertyName, roomNumber, {
+          skipPreSteps: i > 0
+        });
 
         const result = {
           property: prop,
@@ -719,6 +827,7 @@ module.exports = {
   searchMultipleOnPlatform,
   performLogin,
   performSearch,
+  normalizeAdToMonths,
   credentials,
   platformSkills,
   reloadSkills

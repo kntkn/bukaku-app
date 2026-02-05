@@ -16,8 +16,8 @@ class BukakuPipeline extends EventEmitter {
     super();
 
     // 設定
-    this.batchSize = options.batchSize || 5;  // 物確バッチサイズ
-    this.batchWaitTime = options.batchWaitTime || 2000;  // バッチ待機時間（ms）
+    this.batchSize = options.batchSize || 1;  // 物確バッチサイズ（1=即時処理）
+    this.batchWaitTime = options.batchWaitTime || 500;  // バッチ待機時間（ms）
 
     // 状態
     this.propertyQueue = [];  // 解析済み・未物確の物件キュー
@@ -223,8 +223,9 @@ class BukakuPipeline extends EventEmitter {
         onResult: (result) => {
           this.handleBukakuResult(result, platformId, 'batch');
         },
-        onScreenshot: (image) => {
-          this.emit('screenshot', { image, platformId });
+        onScreenshot: (data) => {
+          // data = { platformId, image } の形式で渡ってくる
+          this.emit('screenshot', { image: data.image, platformId: data.platformId });
         }
       });
     } catch (error) {

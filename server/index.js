@@ -18,7 +18,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { Client } = require('@notionhq/client');
 
 // 並列検索・学習機能モジュール
-const { parallelSearch, searchOnPlatform, searchMultipleOnPlatform } = require('./engine/parallel-searcher');
+const { parallelSearch, searchOnPlatform, searchMultipleOnPlatform, normalizeAdToMonths } = require('./engine/parallel-searcher');
 const { getSearchStrategy, learnMapping, getStats } = require('./engine/company-mapper');
 const { groupByPlatform, getGroupSummary, createExecutionPlan, calculateEfficiency } = require('./engine/smart-scheduler');
 const { BukakuPipeline } = require('./engine/bukaku-pipeline');
@@ -43,7 +43,10 @@ const PORT = process.env.PORT || 3001;
 const server = http.createServer(app);
 
 // WebSocketサーバーを作成
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({
+  server,
+  maxPayload: 200 * 1024 * 1024  // 200MB（複数PDF対応）
+});
 
 // アクティブなセッションを管理
 const sessions = new Map();
@@ -66,32 +69,37 @@ async function saveBukakuResultToNotion(property, results, platform) {
     const databaseId = process.env.NOTION_DATABASE_ID;
 
     const propertyName = property?.property_name || '不明';
-    const roomNumber = property?.room_number || '';
-    const displayTitle = roomNumber ? `${propertyName} / ${roomNumber}` : propertyName;
+    // 部屋番号は数字のみ（"101号室" → "101"）
+    const roomNumber = (property?.room_number || '').replace(/[^0-9]/g, '');
 
-    // プロパティ構築
+    // プラットフォーム名を解決（platformIdから実際のサイト名に変換）
+    const { credentials: creds } = require('./engine/parallel-searcher');
+    let siteName = '不明';
+    if (platform && creds.platforms[platform]) {
+      siteName = creds.platforms[platform].name;
+    } else if (platform && platform !== 'parallel' && platform !== '並列検索') {
+      siteName = platform;
+    }
+
     const properties = {
       '物件名': {
-        title: [{ text: { content: displayTitle } }]
+        title: [{ text: { content: propertyName } }]
       },
-      '部屋番号': {
+      '部屋番号（号室）': {
         rich_text: [{ text: { content: roomNumber } }]
       },
-      'ヒットプラットフォーム': {
-        rich_text: [{ text: { content: platform?.toUpperCase() || '不明' } }]
+      '物確サイト': {
+        rich_text: [{ text: { content: siteName } }]
       },
       '確認日時': {
         date: { start: new Date().toISOString() }
-      },
-      '確認サイト数': {
-        number: results?.length || 0
       }
     };
 
     // ステータス設定
     if (results && results.length > 0) {
       const firstResult = results[0];
-      properties['空室状況'] = {
+      properties['status'] = {
         select: {
           name: firstResult.status === 'available' ? '空室あり' :
             firstResult.status === 'applied' ? '要電話確認' : '不明'
@@ -101,34 +109,25 @@ async function saveBukakuResultToNotion(property, results, platform) {
         checkbox: firstResult.viewing_available || false
       };
     } else {
-      properties['空室状況'] = {
+      properties['status'] = {
         select: { name: '該当なし' }
       };
     }
 
-    // マイソクデータから追加情報
+    // AD情報・管理会社
     if (property) {
-      if (property.ad_info) {
-        properties['AD情報'] = {
-          rich_text: [{ text: { content: property.ad_info } }]
+      const searchAdMonths = results?.[0]?.ad_months || null;
+      const maisokuAdMonths = normalizeAdToMonths(property.ad_info);
+      const adMonths = searchAdMonths || maisokuAdMonths;
+      if (adMonths) {
+        properties['AD情報（ヶ月）'] = {
+          rich_text: [{ text: { content: adMonths } }]
         };
       }
-      if (property.address) {
-        properties['住所'] = {
-          rich_text: [{ text: { content: property.address } }]
-        };
-      }
-      if (property.rent) {
-        const rentNumber = parseInt(property.rent.replace(/[^0-9]/g, ''), 10);
-        if (!isNaN(rentNumber)) {
-          properties['賓料'] = { number: rentNumber };
-        }
-      }
-      if (property.management_company) {
-        properties['管理会社'] = {
-          rich_text: [{ text: { content: property.management_company } }]
-        };
-      }
+
+      properties['管理会社'] = {
+        rich_text: [{ text: { content: property.management_company || '不明' } }]
+      };
     }
 
     await notion.pages.create({
@@ -136,7 +135,7 @@ async function saveBukakuResultToNotion(property, results, platform) {
       properties
     });
 
-    console.log(`[Notion保存] 完了: ${displayTitle}`);
+    console.log(`[Notion保存] 完了: ${propertyName}`);
     return true;
   } catch (err) {
     console.error('[Notion保存] エラー:', err.message);
@@ -261,13 +260,16 @@ wss.on('connection', (ws) => {
         await executeSmartBukaku(ws, { properties, checkAD });
       }
 
-      // パイプライン物確（大容量PDF対応）
+      // パイプライン物確（大容量PDF対応・複数PDF対応）
       if (data.type === 'start_pipeline_bukaku') {
-        const { pdfBase64 } = data;
+        const { pdfBase64, pdfBase64List } = data;
 
         console.log('[WebSocket] start_pipeline_bukaku受信');
 
-        if (!pdfBase64) {
+        // 複数PDF or 単一PDF
+        const pdfDataList = pdfBase64List || (pdfBase64 ? [pdfBase64] : []);
+
+        if (pdfDataList.length === 0) {
           ws.send(JSON.stringify({
             type: 'error',
             message: 'PDFデータが必要です'
@@ -275,8 +277,10 @@ wss.on('connection', (ws) => {
           return;
         }
 
+        console.log(`[WebSocket] ${pdfDataList.length}件のPDFを受信`);
+
         // パイプライン物確を実行
-        await executePipelineBukaku(ws, pdfBase64);
+        await executePipelineBukaku(ws, pdfDataList);
       }
 
       // パイプラインキャンセル
@@ -1085,76 +1089,69 @@ app.post('/api/notion/record', async (req, res) => {
 
     console.log('[Notion] 物確結果を記録:', propertyName);
 
-    // 結果をまとめて1つのページとして記録
-    // プロパティ名はNotionの物確結果DBに合わせる
-    // タイトルは「物件名 / 部屋番号」形式（部屋番号がある場合）
-    const displayTitle = roomNumber ? `${propertyName || '不明'} / ${roomNumber}` : (propertyName || '不明');
+    // マイソクデータを先に取得（配列の場合は最初の要素を使用）
+    const maisokuData = Array.isArray(parsedData) ? parsedData[0] : parsedData;
+
+    // 部屋番号は数字のみ（"101号室" → "101"）
+    const numericRoomNumber = (roomNumber || maisokuData?.room_number || '').replace(/[^0-9]/g, '');
+
+    // プラットフォーム名を解決
+    const { credentials: creds } = require('./engine/parallel-searcher');
+    let siteName = '不明';
+    if (platform && creds.platforms[platform]) {
+      siteName = creds.platforms[platform].name;
+    } else if (platform && platform !== 'parallel' && platform !== '並列検索') {
+      siteName = platform;
+    }
+
     const properties = {
       '物件名': {
-        title: [{ text: { content: displayTitle } }]
+        title: [{ text: { content: propertyName || '不明' } }]
       },
-      '部屋番号': {
-        rich_text: [{ text: { content: roomNumber || '' } }]
+      '部屋番号（号室）': {
+        rich_text: [{ text: { content: numericRoomNumber } }]
       },
-      'ヒットプラットフォーム': {
-        rich_text: [{ text: { content: platform?.toUpperCase() || 'ITANDI' } }]
+      '物確サイト': {
+        rich_text: [{ text: { content: siteName } }]
       },
       '確認日時': {
         date: { start: new Date().toISOString() }
-      },
-      '確認サイト数': {
-        number: results?.length || 0
       }
     };
-
-    // マイソクデータを先に取得（配列の場合は最初の要素を使用）
-    const maisokuData = Array.isArray(parsedData) ? parsedData[0] : parsedData;
 
     // 最初の結果からステータスを取得
     if (results && results.length > 0) {
       const firstResult = results[0];
-
-      // 空室状況: 空室あり, 満室, 不明, 要電話確認
-      properties['空室状況'] = {
+      properties['status'] = {
         select: {
           name: firstResult.status === 'available' ? '空室あり' :
             firstResult.status === 'applied' ? '要電話確認' : '不明'
         }
       };
-
       properties['内見可否'] = {
         checkbox: firstResult.viewing_available || false
       };
-    }
-
-    // AD情報：マイソクから抽出した値を使用（"100%", "1ヶ月" など）
-    const adInfo = maisokuData?.ad_info || null;
-    if (adInfo) {
-      properties['AD情報'] = {
-        rich_text: [{ text: { content: adInfo } }]
+    } else {
+      properties['status'] = {
+        select: { name: '該当なし' }
       };
     }
-    if (maisokuData) {
-      if (maisokuData.address) {
-        properties['住所'] = {
-          rich_text: [{ text: { content: maisokuData.address } }]
-        };
-      }
-      if (maisokuData.rent) {
-        // 賃料から数字を抽出（例: "90,000円" → 90000）
-        const rentNumber = parseInt(maisokuData.rent.replace(/[^0-9]/g, ''), 10);
-        if (!isNaN(rentNumber)) {
-          properties['賓料'] = {
-            number: rentNumber
-          };
-        }
-      }
-      if (maisokuData.management_company) {
-        properties['管理会社'] = {
-          rich_text: [{ text: { content: maisokuData.management_company } }]
-        };
-      }
+
+    // AD情報: 検索結果 > マイソクの優先順位で正規化してヶ月単位で記録
+    const searchAdMonths = results?.[0]?.ad_months || null;
+    const maisokuAdMonths = normalizeAdToMonths(maisokuData?.ad_info);
+    const adMonths = searchAdMonths || maisokuAdMonths;
+    if (adMonths) {
+      properties['AD情報（ヶ月）'] = {
+        rich_text: [{ text: { content: adMonths } }]
+      };
     }
+
+    // 管理会社（常に書く）
+    const mgmtCompany = maisokuData?.management_company || managementCompany || '不明';
+    properties['管理会社'] = {
+      rich_text: [{ text: { content: mgmtCompany } }]
+    };
 
     const response = await notion.pages.create({
       parent: { database_id: databaseId },
@@ -1193,35 +1190,27 @@ app.post('/api/notion/setup', async (req, res) => {
     const notion = new Client({ auth: process.env.NOTION_TOKEN });
     const databaseId = process.env.NOTION_DATABASE_ID;
 
-    // データベースのプロパティを更新
+    // データベースのプロパティを更新（現在のDB構造に合わせる）
     await notion.databases.update({
       database_id: databaseId,
       properties: {
         '物件名': { title: {} },
-        'ステータス': {
+        'status': {
           select: {
             options: [
-              { name: '募集中', color: 'green' },
-              { name: '申込あり', color: 'yellow' },
-              { name: '確認不可', color: 'red' }
+              { name: '空室あり', color: 'green' },
+              { name: '要電話確認', color: 'yellow' },
+              { name: '不明', color: 'gray' },
+              { name: '満室', color: 'red' },
+              { name: '該当なし', color: 'pink' }
             ]
           }
         },
-        'プラットフォーム': {
-          select: {
-            options: [
-              { name: 'ITANDI', color: 'blue' },
-              { name: 'いえらぶ', color: 'purple' }
-            ]
-          }
-        },
-        'AD情報': { rich_text: {} },
-        '部屋番号': { rich_text: {} },
+        '物確サイト': { rich_text: {} },
+        'AD情報（ヶ月）': { rich_text: {} },
+        '部屋番号（号室）': { rich_text: {} },
         '内見可否': { checkbox: {} },
         '確認日時': { date: {} },
-        '確認サイト数': { number: {} },
-        '住所': { rich_text: {} },
-        '賓料': { number: { format: 'yen' } },
         '管理会社': { rich_text: {} }
       }
     });
@@ -1413,16 +1402,31 @@ app.delete('/api/companies/:name', (req, res) => {
 });
 
 /**
- * パイプライン物確を実行（大容量PDF対応）
+ * パイプライン物確を実行（大容量PDF・複数PDF対応）
  * 解析と物確を並行して実行
+ * @param {WebSocket} ws
+ * @param {string[]} pdfBase64List - Base64エンコードされたPDFデータの配列
  */
-async function executePipelineBukaku(ws, pdfBase64) {
-  console.log('[パイプライン物確] 開始');
+async function executePipelineBukaku(ws, pdfBase64List) {
+  console.log(`[パイプライン物確] 開始 (${pdfBase64List.length}ファイル)`);
 
-  const pdfBuffer = Buffer.from(pdfBase64, 'base64');
+  const { mergePdfs } = require('./engine/pdf-splitter');
+
+  // 複数PDFをBufferに変換
+  const pdfBuffers = pdfBase64List.map(b64 => Buffer.from(b64, 'base64'));
+
+  // 複数PDFを結合
+  let pdfBuffer;
+  if (pdfBuffers.length > 1) {
+    ws.send(JSON.stringify({ type: 'status', message: `${pdfBuffers.length}件のPDFを結合中...` }));
+    pdfBuffer = await mergePdfs(pdfBuffers);
+  } else {
+    pdfBuffer = pdfBuffers[0];
+  }
+
   const pipeline = new BukakuPipeline({
-    batchSize: 5,
-    batchWaitTime: 2000
+    batchSize: 1,
+    batchWaitTime: 500
   });
 
   // WebSocketにパイプラインを保存（キャンセル用）
