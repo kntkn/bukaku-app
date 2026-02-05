@@ -780,6 +780,11 @@ export default function Home() {
                 </span>
                 <span style={{ fontSize: 13, color: '#6b7280' }}>
                   {parsingProgress.parsed}/{parsingProgress.total}ページ
+                  {parsedProperties.length > 0 && (
+                    <span style={{ color: '#f97316', marginLeft: 8 }}>
+                      → {parsedProperties.length}件検出
+                    </span>
+                  )}
                 </span>
               </div>
               <div style={{

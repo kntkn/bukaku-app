@@ -110,6 +110,13 @@ async function parsePageAsync(pageBuffer, pageNumber) {
     // 空の物件をフィルタリング
     properties = properties.filter(p => p && p.property_name);
 
+    // マイソクは1ページ=1物件が原則。複数検出された場合は最初の1件を採用
+    // （AIがテーブル内の情報を個別エントリとして分割してしまうケースの対策）
+    if (properties.length > 1) {
+      console.log(`[解析] ページ${pageNumber}: ${properties.length}件検出 → 1件に集約`);
+      properties = [properties[0]];
+    }
+
     // ページ番号を付与
     properties = properties.map(p => ({ ...p, source_page: pageNumber }));
 
