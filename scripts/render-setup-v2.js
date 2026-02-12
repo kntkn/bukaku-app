@@ -183,7 +183,7 @@ async function setupRender() {
       if (keyInputs.length > 0) {
         await keyInputs[keyInputs.length - 1].fill('ITANDI_EMAIL');
         if (valueInputs.length > 0) {
-          await valueInputs[valueInputs.length - 1].fill('info@fun-t.jp');
+          await valueInputs[valueInputs.length - 1].fill(process.env.ITANDI_EMAIL || '');
         }
         console.log('✓ ITANDI_EMAIL を設定');
       }
