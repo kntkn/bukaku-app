@@ -82,6 +82,10 @@ function replaceVariables(value, creds, propertyName, roomNumber = '') {
 /**
  * 単一ステップを実行
  */
+// 高速化: デフォルトタイムアウトを短縮
+const DEFAULT_TIMEOUT = 5000;  // 15秒 → 5秒
+const GOTO_TIMEOUT = 10000;    // 30秒 → 10秒
+
 async function executeStep(page, step, creds, propertyName, roomNumber = '') {
   const action = step.action;
   const selector = replaceVariables(step.selector, creds, propertyName, roomNumber);
@@ -92,7 +96,7 @@ async function executeStep(page, step, creds, propertyName, roomNumber = '') {
       case 'waitFor':
         await page.waitForSelector(selector, {
           state: 'visible',
-          timeout: step.timeout || 15000
+          timeout: step.timeout || DEFAULT_TIMEOUT
         });
         break;
 
@@ -117,11 +121,29 @@ async function executeStep(page, step, creds, propertyName, roomNumber = '') {
         break;
 
       case 'wait':
-        await page.waitForTimeout(step.ms || 1000);
+        // 固定waitは最大1秒に制限（高速化）
+        await page.waitForTimeout(Math.min(step.ms || 500, 1000));
+        break;
+
+      case 'smartWait':
+        // 賢い待機: セレクタが出るまで or タイムアウト
+        if (step.selector) {
+          await page.waitForSelector(step.selector, {
+            state: 'visible',
+            timeout: step.timeout || DEFAULT_TIMEOUT
+          }).catch(() => {});
+        } else {
+          await page.waitForLoadState('domcontentloaded', {
+            timeout: step.timeout || DEFAULT_TIMEOUT
+          }).catch(() => {});
+        }
         break;
 
       case 'goto':
-        await page.goto(step.url, { timeout: 30000 }).catch(() => {});
+        await page.goto(step.url, {
+          timeout: GOTO_TIMEOUT,
+          waitUntil: 'domcontentloaded'  // networkidle → domcontentloaded
+        }).catch(() => {});
         break;
 
       case 'pressKey':
@@ -129,7 +151,10 @@ async function executeStep(page, step, creds, propertyName, roomNumber = '') {
         break;
 
       case 'waitForLoad':
-        await page.waitForLoadState('networkidle').catch(() => {});
+        // networkidle → domcontentloaded（高速化）
+        await page.waitForLoadState('domcontentloaded', {
+          timeout: DEFAULT_TIMEOUT
+        }).catch(() => {});
         break;
     }
     return true;
@@ -240,10 +265,11 @@ async function performLogin(page, platformId, platform) {
  * @param {boolean} options.skipPreSteps - preStepsをスキップ（連続検索時）
  */
 async function performSearch(page, platformId, propertyName, roomNumber = '', options = {}) {
-  const { skipPreSteps = false } = options;
+  const { skipPreSteps = false, onStep = () => {} } = options;
   const skills = platformSkills[platformId];
   const platform = credentials.platforms[platformId];
   const creds = platform?.credentials || {};
+  const platformName = platform?.name || platformId;
 
   if (!skills || !skills.search) {
     console.log(`[${platformId}] No search skills defined, using fallback`);
@@ -273,12 +299,13 @@ async function performSearch(page, platformId, propertyName, roomNumber = '', op
 
   // preSteps（検索ページへの遷移など）- 連続検索時はスキップ
   if (skills.search.preSteps && !skipPreSteps) {
+    onStep({ platformId, message: `${platformName}の検索ページを開いています...` });
     await executeSteps(page, skills.search.preSteps, creds, propertyName, roomNumber);
   }
 
   // 連続検索時は検索フォームをクリアしてから入力
   if (skipPreSteps && skills.search.steps) {
-    // 検索フォームをクリア（入力フィールドを空にする）
+    onStep({ platformId, message: `検索フォームをクリア中...` });
     try {
       const inputSelector = skills.search.steps.find(s => s.action === 'fill')?.selector;
       if (inputSelector) {
@@ -291,15 +318,18 @@ async function performSearch(page, platformId, propertyName, roomNumber = '', op
   }
 
   // メインの検索ステップ
+  onStep({ platformId, message: `「${propertyName}」を入力中...` });
   await executeSteps(page, skills.search.steps, creds, propertyName, roomNumber);
 
   // 部屋番号入力ステップ（定義されていれば実行）
   if (roomNumber && skills.search.roomNumberSteps) {
+    onStep({ platformId, message: `部屋番号「${roomNumber}」を入力中...` });
     console.log(`[${platformId}] Filling room number: "${roomNumber}"`);
     await executeSteps(page, skills.search.roomNumberSteps, creds, propertyName, roomNumber);
   }
 
   // 結果抽出
+  onStep({ platformId, message: `${platformName}で結果を確認中...` });
   return await extractResults(page, platformId, propertyName, skills.search.resultExtraction);
 }
 
@@ -333,6 +363,25 @@ async function extractResults(page, platformId, propertyName, extraction) {
       }
 
       const result = extractResultInfo(cardText, extraction, adText);
+
+      // Web申し込みバッジの確認（MuiBadge等）
+      if (extraction?.applicationBadgeSelector) {
+        try {
+          const badges = await card.$$(extraction.applicationBadgeSelector);
+          for (const badge of badges) {
+            const badgeText = await badge.textContent();
+            const count = parseInt(badgeText.trim(), 10);
+            if (count >= 1) {
+              result.status = 'applied';
+              result.web_application_count = count;
+              break;
+            }
+          }
+        } catch (e) {
+          // バッジ取得失敗は無視
+        }
+      }
+
       results.push(result);
     }
 

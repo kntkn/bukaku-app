@@ -1,216 +1,223 @@
 /**
- * パイプライン解析モジュール
- * PDFをページごとに並列解析し、物件発見時にコールバックを発火
+ * パイプライン解析モジュール（Haiku + バッチ処理版）
+ * PDFを高速バッチ解析し、物件発見時にコールバックを発火
  */
 
 const Anthropic = require('@anthropic-ai/sdk');
 const pLimit = require('p-limit').default;
-const { splitPdfToPages, getPageCount } = require('./pdf-splitter');
+const { splitPdfStreaming, getPageCount } = require('./pdf-splitter');
 
 const anthropic = new Anthropic();
 
-// デフォルト設定
-const DEFAULT_CONCURRENCY = 5;  // 同時解析ページ数
-const MIN_REQUEST_INTERVAL = 200;  // APIリクエスト間隔（ms）
+// 高速設定
+const BATCH_SIZE = 5;           // 1回のAPI呼び出しで処理するページ数
+const BATCH_CONCURRENCY = 6;    // 同時バッチ数（5×6=30ページ並列）
+const MIN_REQUEST_INTERVAL = 50; // APIリクエスト間隔（ms）
 
-// 解析プロンプト
-const PARSE_PROMPT = `あなたは不動産マイソク（物件資料）の解析専門家です。
-以下は複数ページのPDFから分割された「1ページのみ」の資料です。
+// バッチ解析プロンプト（複数ページ対応）
+const BATCH_PARSE_PROMPT = `あなたは不動産マイソク（物件資料）の解析専門家です。
+複数ページのPDFが添付されています。各ページから物件情報を抽出してください。
 
-【絶対ルール】
-- このページに直接印刷・記載されている情報のみを抽出すること
-- 他のページの情報を推測・補完してはいけない
-- 確信が持てない情報はnullとすること
+【ルール】
+- 各ページに記載された情報のみ抽出（推測禁止）
+- 確信がない項目はnull
+- 物件情報がないページは空配列
 
 【抽出項目】
-1. 物件名（建物名）- ページ上部や中央に大きく記載されていることが多い
-2. 部屋番号 - 「101」「203」などの表記
-3. 所在地（住所）
-4. 賃料（管理費・共益費も含めて）
-5. 管理会社名 - 以下の場所を確認すること：
-   - ページ下部の帯（カラーバンド）内の会社名
-   - 「取引態様」「媒介」「仲介」の近くの会社名
-   - ロゴマークと共に表示された会社名
-   - 「TEL」「FAX」番号の横の会社名
-   ※重要: このページ内に管理会社名が見当たらない場合は必ずnullにすること。推測や他ページからの補完は禁止。
-6. 間取り
-7. 専有面積
-8. 築年月
+物件名、部屋番号、住所、賃料、管理費、管理会社名、間取り、専有面積、築年月
 
 【出力形式】
-このページに物件情報がない場合は [] を返してください。
-複数の物件がある場合は配列で返してください。
+ページ番号をキーにしたJSONオブジェクト:
+{
+  "1": [{"property_name": "...", "room_number": "...", "address": "...", "rent": "...", "management_fee": "...", "management_company": "...", "floor_plan": "...", "area": "...", "built_date": "..."}],
+  "2": [],
+  "3": [{"property_name": "...", ...}]
+}
 
-JSON形式で回答：
-[
-  {
-    "property_name": "物件名",
-    "room_number": "部屋番号（101など）",
-    "address": "住所",
-    "rent": "賃料（例: 85,000円）",
-    "management_fee": "管理費・共益費",
-    "management_company": "管理会社名（このページ内に見つからない場合はnull）",
-    "floor_plan": "間取り（例: 1K）",
-    "area": "専有面積（例: 25.5㎡）",
-    "built_date": "築年月"
-  }
-]
-
-情報が見つからない項目はnullを入れてください。
-物件情報がないページの場合は [] を返してください。`;
+物件がないページは空配列[]、1ページ1物件が原則です。`;
 
 /**
- * 単一ページを解析
- * @param {Buffer} pageBuffer - ページのPDF Buffer
- * @param {number} pageNumber - ページ番号
- * @returns {Promise<{pageNumber: number, properties: Array, success: boolean, error?: string}>}
+ * 複数ページをバッチ解析
+ * @param {Array<{pageNumber: number, buffer: Buffer}>} pages - ページ配列
+ * @returns {Promise<Array<{pageNumber: number, properties: Array, success: boolean}>>}
  */
-async function parsePageAsync(pageBuffer, pageNumber) {
-  const pdfBase64 = pageBuffer.toString('base64');
+async function parseBatchAsync(pages) {
+  if (pages.length === 0) return [];
+
+  // 各ページのPDFをBase64エンコード
+  const content = [];
+  const pageNumbers = [];
+
+  for (const { pageNumber, buffer } of pages) {
+    pageNumbers.push(pageNumber);
+    content.push({
+      type: 'document',
+      source: {
+        type: 'base64',
+        media_type: 'application/pdf',
+        data: buffer.toString('base64')
+      }
+    });
+  }
+
+  // ページ番号の説明を追加
+  content.push({
+    type: 'text',
+    text: `${BATCH_PARSE_PROMPT}\n\n添付PDFのページ番号: ${pageNumbers.join(', ')}`
+  });
 
   try {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 1024,
+      max_tokens: 4096,
       messages: [{
         role: 'user',
-        content: [
-          {
-            type: 'document',
-            source: {
-              type: 'base64',
-              media_type: 'application/pdf',
-              data: pdfBase64
-            }
-          },
-          {
-            type: 'text',
-            text: PARSE_PROMPT
-          }
-        ]
+        content
       }]
     });
 
-    const content = response.content[0].text;
+    const responseText = response.content[0].text;
 
     // JSONを抽出
-    let jsonStr = content;
-    const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/\[[\s\S]*\]/);
+    let jsonStr = responseText;
+    const jsonMatch = responseText.match(/```json\s*([\s\S]*?)\s*```/) || responseText.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       jsonStr = jsonMatch[1] || jsonMatch[0];
     }
 
-    let properties = JSON.parse(jsonStr);
+    const parsed = JSON.parse(jsonStr);
 
-    // 配列でない場合は配列に変換
-    if (!Array.isArray(properties)) {
-      properties = properties ? [properties] : [];
+    // 結果を各ページに分配
+    const results = [];
+    for (const pageNumber of pageNumbers) {
+      let properties = parsed[String(pageNumber)] || parsed[pageNumber] || [];
+
+      // 配列でない場合は配列に変換
+      if (!Array.isArray(properties)) {
+        properties = properties ? [properties] : [];
+      }
+
+      // 空の物件をフィルタリング
+      properties = properties.filter(p => p && p.property_name);
+
+      // 1ページ1物件に制限
+      if (properties.length > 1) {
+        properties = [properties[0]];
+      }
+
+      // ページ番号を付与
+      properties = properties.map(p => ({ ...p, source_page: pageNumber }));
+
+      results.push({
+        pageNumber,
+        properties,
+        success: true
+      });
     }
 
-    // 空の物件をフィルタリング
-    properties = properties.filter(p => p && p.property_name);
-
-    // マイソクは1ページ=1物件が原則。複数検出された場合は最初の1件を採用
-    // （AIがテーブル内の情報を個別エントリとして分割してしまうケースの対策）
-    if (properties.length > 1) {
-      console.log(`[解析] ページ${pageNumber}: ${properties.length}件検出 → 1件に集約`);
-      properties = [properties[0]];
-    }
-
-    // ページ番号を付与
-    properties = properties.map(p => ({ ...p, source_page: pageNumber }));
-
-    console.log(`[解析] ページ${pageNumber}: ${properties.length}件の物件を検出`);
-
-    return {
-      pageNumber,
-      properties,
-      success: true
-    };
+    console.log(`[バッチ解析] ページ${pageNumbers.join(',')} 完了: ${results.reduce((sum, r) => sum + r.properties.length, 0)}件`);
+    return results;
 
   } catch (error) {
-    console.error(`[解析] ページ${pageNumber} 失敗:`, error.message);
-    return {
+    console.error(`[バッチ解析] ページ${pageNumbers.join(',')} 失敗:`, error.message);
+
+    // 失敗時は全ページをエラーとして返す
+    return pageNumbers.map(pageNumber => ({
       pageNumber,
       properties: [],
       success: false,
       error: error.message
-    };
+    }));
   }
 }
 
 /**
- * PDFをパイプライン解析
+ * 単一ページを解析（フォールバック用）
+ */
+async function parsePageAsync(pageBuffer, pageNumber) {
+  const results = await parseBatchAsync([{ pageNumber, buffer: pageBuffer }]);
+  return results[0] || { pageNumber, properties: [], success: false, error: 'No result' };
+}
+
+/**
+ * PDFを高速バッチ解析
  * @param {Buffer} pdfBuffer - PDFファイルのBuffer
  * @param {Object} options - オプション
- * @param {number} options.concurrency - 並列度（デフォルト5）
- * @param {Function} options.onProgress - 進捗コールバック({parsed, total})
- * @param {Function} options.onPageParsed - ページ解析完了コールバック(pageNumber, result)
- * @param {Function} options.onPropertyFound - 物件発見コールバック(property)
- * @param {AbortSignal} options.signal - キャンセル用シグナル
- * @returns {Promise<{totalPages: number, properties: Array, failedPages: Array}>}
  */
 async function parsePdfPipeline(pdfBuffer, options = {}) {
   const {
-    concurrency = DEFAULT_CONCURRENCY,
     onProgress,
     onPageParsed,
     onPropertyFound,
     signal
   } = options;
 
-  // PDFをページごとに分割
-  const { totalPages, pageBuffers } = await splitPdfToPages(pdfBuffer);
+  const startTime = Date.now();
 
-  console.log(`[パイプライン解析] ${totalPages}ページを${concurrency}並列で解析開始`);
+  // ページ数を取得
+  const totalPages = await getPageCount(pdfBuffer);
+  console.log(`[高速解析] ${totalPages}ページをバッチ${BATCH_SIZE}×${BATCH_CONCURRENCY}並列で解析`);
+  onProgress?.({ parsed: 0, total: totalPages });
 
-  const limit = pLimit(concurrency);
+  // 全ページを分割
+  const allPages = [];
+  await splitPdfStreaming(pdfBuffer, async ({ pageNumber, buffer }) => {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    allPages.push({ pageNumber, buffer });
+  });
+
+  // バッチに分割
+  const batches = [];
+  for (let i = 0; i < allPages.length; i += BATCH_SIZE) {
+    batches.push(allPages.slice(i, i + BATCH_SIZE));
+  }
+
+  console.log(`[高速解析] ${batches.length}バッチに分割`);
+
+  // バッチを並列処理
+  const limit = pLimit(BATCH_CONCURRENCY);
   let parsedCount = 0;
   const allProperties = [];
   const failedPages = [];
-
-  // レート制限用
   let lastRequestTime = 0;
 
-  const parsePromises = pageBuffers.map(({ pageNumber, buffer }) =>
+  const batchPromises = batches.map((batch, batchIndex) =>
     limit(async () => {
-      // キャンセルチェック
-      if (signal?.aborted) {
-        throw new DOMException('Aborted', 'AbortError');
-      }
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
       // レート制限
       const now = Date.now();
       const wait = MIN_REQUEST_INTERVAL - (now - lastRequestTime);
-      if (wait > 0) {
-        await new Promise(r => setTimeout(r, wait));
-      }
+      if (wait > 0) await new Promise(r => setTimeout(r, wait));
       lastRequestTime = Date.now();
 
-      // 解析実行
-      const result = await parsePageAsync(buffer, pageNumber);
-      parsedCount++;
+      // バッチ解析
+      const results = await parseBatchAsync(batch);
 
-      // 進捗通知
-      onProgress?.({ parsed: parsedCount, total: totalPages });
-      onPageParsed?.(pageNumber, result);
+      // 結果を処理
+      for (const result of results) {
+        parsedCount++;
+        onProgress?.({ parsed: parsedCount, total: totalPages });
+        onPageParsed?.(result.pageNumber, result);
 
-      if (result.success && result.properties.length > 0) {
-        allProperties.push(...result.properties);
-        result.properties.forEach(p => onPropertyFound?.(p));
+        if (result.success && result.properties.length > 0) {
+          allProperties.push(...result.properties);
+          result.properties.forEach(p => onPropertyFound?.(p));
+        }
+
+        if (!result.success) {
+          failedPages.push({ pageNumber: result.pageNumber, error: result.error });
+        }
       }
 
-      if (!result.success) {
-        failedPages.push({ pageNumber, error: result.error });
-      }
-
-      return result;
+      return results;
     })
   );
 
-  await Promise.all(parsePromises);
+  await Promise.all(batchPromises);
 
-  console.log(`[パイプライン解析] 完了: ${allProperties.length}件の物件, ${failedPages.length}ページ失敗`);
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+  console.log(`[高速解析] 完了: ${allProperties.length}件 (${elapsed}秒, ${(totalPages / elapsed).toFixed(1)}ページ/秒)`);
 
   return {
     totalPages,
@@ -220,21 +227,16 @@ async function parsePdfPipeline(pdfBuffer, options = {}) {
 }
 
 /**
- * ストリーミング解析（解析開始後すぐにPromiseを返し、コールバックで結果を通知）
- * @param {Buffer} pdfBuffer - PDFファイルのBuffer
- * @param {Object} options - オプション（parsePdfPipelineと同じ）
- * @returns {{promise: Promise, getProgress: Function}}
+ * ストリーミング解析インターフェース（互換性維持）
  */
 function startParsing(pdfBuffer, options = {}) {
   let parsedCount = 0;
   let totalPages = 0;
 
   const promise = (async () => {
-    // まずページ数を取得
     totalPages = await getPageCount(pdfBuffer);
     options.onProgress?.({ parsed: 0, total: totalPages });
 
-    // 本解析開始
     return parsePdfPipeline(pdfBuffer, {
       ...options,
       onProgress: (progress) => {
@@ -252,6 +254,7 @@ function startParsing(pdfBuffer, options = {}) {
 
 module.exports = {
   parsePageAsync,
+  parseBatchAsync,
   parsePdfPipeline,
   startParsing
 };

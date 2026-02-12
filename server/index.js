@@ -5,6 +5,7 @@
 
 // 環境変数を読み込み（プロジェクトルートの.envを明示的に指定）
 const path = require('path');
+const fs = require('fs');
 require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 
 const express = require('express');
@@ -19,9 +20,12 @@ const { Client } = require('@notionhq/client');
 
 // 並列検索・学習機能モジュール
 const { parallelSearch, searchOnPlatform, searchMultipleOnPlatform, normalizeAdToMonths } = require('./engine/parallel-searcher');
-const { getSearchStrategy, learnMapping, getStats } = require('./engine/company-mapper');
+const { getSearchStrategy, learnMapping, getStats, preloadNotionCache } = require('./engine/company-mapper');
 const { groupByPlatform, getGroupSummary, createExecutionPlan, calculateEfficiency } = require('./engine/smart-scheduler');
 const { BukakuPipeline } = require('./engine/bukaku-pipeline');
+
+// 高速並列検索（ブラウザプール使用）
+const { fastParallelSearch, fastBatchSearch, getPoolStatus, shutdownPool, browserPool } = require('./engine/fast-parallel-search');
 
 const app = express();
 
@@ -165,6 +169,229 @@ app.get('/health', (req, res) => {
   res.json({ status: 'healthy' });
 });
 
+// ============================================
+// 認証API
+// ============================================
+const jwt = require('jsonwebtoken');
+const JWT_SECRET = process.env.JWT_SECRET || 'bukkaku-secret-key-change-in-production';
+
+// ユーザーデータ（本番ではDBに移行）
+const USERS_FILE = path.join(__dirname, '../data/users.json');
+
+function getUsers() {
+  try {
+    if (fs.existsSync(USERS_FILE)) {
+      return JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8'));
+    }
+  } catch (e) {}
+  // デフォルトユーザー（初期設定用）
+  return {
+    users: [
+      { id: '1', email: 'info@fun-t.jp', password: 'funt0406', role: 'admin', name: 'Admin' }
+    ]
+  };
+}
+
+function saveUsers(data) {
+  const dir = path.dirname(USERS_FILE);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  fs.writeFileSync(USERS_FILE, JSON.stringify(data, null, 2));
+}
+
+// ログイン
+app.post('/api/auth/login', (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ success: false, error: 'メールアドレスとパスワードが必要です' });
+  }
+
+  const { users } = getUsers();
+  const user = users.find(u => u.email === email && u.password === password);
+
+  if (!user) {
+    return res.status(401).json({ success: false, error: 'メールアドレスまたはパスワードが間違っています' });
+  }
+
+  const token = jwt.sign(
+    { id: user.id, email: user.email, role: user.role, name: user.name },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+
+  res.json({
+    success: true,
+    token,
+    user: { id: user.id, email: user.email, role: user.role, name: user.name }
+  });
+});
+
+// トークン検証
+app.get('/api/auth/me', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ success: false, error: '認証が必要です' });
+  }
+
+  const token = authHeader.split(' ')[1];
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    res.json({ success: true, user: decoded });
+  } catch (e) {
+    res.status(401).json({ success: false, error: 'トークンが無効です' });
+  }
+});
+
+// ユーザー作成（管理者のみ）
+app.post('/api/auth/users', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ success: false, error: '認証が必要です' });
+  }
+
+  try {
+    const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+    if (decoded.role !== 'admin') {
+      return res.status(403).json({ success: false, error: '管理者権限が必要です' });
+    }
+  } catch (e) {
+    return res.status(401).json({ success: false, error: 'トークンが無効です' });
+  }
+
+  const { email, password, name, role = 'user' } = req.body;
+
+  if (!email || !password || !name) {
+    return res.status(400).json({ success: false, error: 'メール、パスワード、名前が必要です' });
+  }
+
+  const data = getUsers();
+
+  if (data.users.some(u => u.email === email)) {
+    return res.status(400).json({ success: false, error: 'このメールアドレスは既に登録されています' });
+  }
+
+  const newUser = {
+    id: String(Date.now()),
+    email,
+    password,
+    name,
+    role
+  };
+
+  data.users.push(newUser);
+  saveUsers(data);
+
+  res.json({
+    success: true,
+    user: { id: newUser.id, email: newUser.email, name: newUser.name, role: newUser.role }
+  });
+});
+
+// ブラウザプールステータス
+app.get('/api/pool/status', (req, res) => {
+  res.json({
+    success: true,
+    ...getPoolStatus()
+  });
+});
+
+// ブラウザプール初期化
+app.post('/api/pool/init', async (req, res) => {
+  try {
+    const { performLogin } = require('./engine/parallel-searcher');
+    await browserPool.initializeAll();
+
+    // 全プラットフォームでログイン
+    const platforms = browserPool.browsers.keys();
+    for (const pid of platforms) {
+      await browserPool.login(pid, performLogin);
+    }
+
+    res.json({
+      success: true,
+      ...getPoolStatus()
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ブラウザプール終了
+app.post('/api/pool/shutdown', async (req, res) => {
+  try {
+    await shutdownPool();
+    res.json({ success: true, message: 'ブラウザプールを終了しました' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// プラットフォーム認証情報取得
+app.get('/api/platforms/credentials', (req, res) => {
+  const { credentials } = require('./engine/parallel-searcher');
+
+  const platformCreds = {};
+  for (const [id, platform] of Object.entries(credentials.platforms)) {
+    platformCreds[id] = {
+      username: platform.credentials?.email || platform.credentials?.id || '',
+      password: platform.credentials?.password || ''
+    };
+  }
+
+  res.json({ success: true, credentials: platformCreds });
+});
+
+// 個別プラットフォームログイン
+app.post('/api/platforms/:platformId/login', async (req, res) => {
+  const { platformId } = req.params;
+  const { username, password } = req.body;
+
+  if (!username || !password) {
+    return res.status(400).json({ success: false, error: 'ID/パスワードが必要です' });
+  }
+
+  try {
+    const { performLogin, credentials } = require('./engine/parallel-searcher');
+    const platform = credentials.platforms[platformId];
+
+    if (!platform) {
+      return res.status(404).json({ success: false, error: 'プラットフォームが見つかりません' });
+    }
+
+    // 一時的に認証情報を上書き
+    const originalCreds = { ...platform.credentials };
+    platform.credentials = {
+      ...platform.credentials,
+      email: username,
+      id: username,
+      password: password
+    };
+
+    // ブラウザプールで該当プラットフォームを初期化
+    await browserPool.initializePlatform(platformId);
+
+    // ログイン実行
+    const success = await browserPool.login(platformId, performLogin);
+
+    // 認証情報を戻す（or 永続化する場合はここで保存）
+    if (!success) {
+      platform.credentials = originalCreds;
+    }
+
+    res.json({
+      success,
+      platformId,
+      message: success ? 'ログイン成功' : 'ログイン失敗'
+    });
+  } catch (error) {
+    console.error(`[${platformId}] ログインエラー:`, error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // 物確セッション開始（WebSocket用のセッションIDを返す）
 app.post('/api/bukaku/start', (req, res) => {
   const { propertyName, checkAD, platform = 'itandi' } = req.body;
@@ -281,10 +508,12 @@ wss.on('connection', (ws) => {
           return;
         }
 
-        console.log(`[WebSocket] ${pdfDataList.length}件のPDFを受信`);
+        console.log(`[WebSocket] ${pdfDataList.length}件のPDFを受信, useFastSearch: ${data.useFastSearch || false}`);
 
         // パイプライン物確を実行
-        await executePipelineBukaku(ws, pdfDataList);
+        await executePipelineBukaku(ws, pdfDataList, {
+          useFastSearch: data.useFastSearch || false
+        });
       }
 
       // パイプラインキャンセル
@@ -293,6 +522,116 @@ wss.on('connection', (ws) => {
         if (ws.pipeline) {
           ws.pipeline.cancel();
         }
+      }
+
+      // 高速並列検索（ブラウザプール使用、全プラットフォーム同時）
+      if (data.type === 'start_fast_search') {
+        const { propertyName, roomNumber, stopOnFirstHit = true } = data;
+
+        if (!propertyName) {
+          ws.send(JSON.stringify({ type: 'error', message: '物件名が必要です' }));
+          return;
+        }
+
+        console.log('[WebSocket] start_fast_search受信:', propertyName);
+
+        try {
+          const result = await fastParallelSearch(propertyName, {
+            roomNumber,
+            stopOnFirstHit,
+            onStatus: (status, message) => {
+              ws.send(JSON.stringify({ type: 'status', status, message }));
+            },
+            onProgress: (progress) => {
+              ws.send(JSON.stringify({ type: 'search_progress', ...progress }));
+            },
+            onScreenshot: (screenshots) => {
+              ws.send(JSON.stringify({ type: 'screenshots', images: screenshots }));
+            }
+          });
+
+          ws.send(JSON.stringify({
+            type: 'fast_search_result',
+            success: result.success,
+            property_name: propertyName,
+            hits: result.hits,
+            misses: result.misses,
+            errors: result.errors,
+            stats: result.stats
+          }));
+
+        } catch (error) {
+          console.error('[高速検索] エラー:', error);
+          ws.send(JSON.stringify({ type: 'error', message: error.message }));
+        }
+      }
+
+      // 高速バッチ検索（複数物件をブラウザプールで処理）
+      if (data.type === 'start_fast_batch') {
+        const { properties } = data;
+
+        if (!properties || properties.length === 0) {
+          ws.send(JSON.stringify({ type: 'error', message: '物件リストが必要です' }));
+          return;
+        }
+
+        console.log('[WebSocket] start_fast_batch受信:', properties.length, '件');
+
+        try {
+          const result = await fastBatchSearch(properties, {
+            onStatus: (status, message) => {
+              ws.send(JSON.stringify({ type: 'status', status, message }));
+            },
+            onProgress: (progress) => {
+              ws.send(JSON.stringify({ type: 'batch_progress', ...progress }));
+            },
+            onResult: async (propResult) => {
+              // 結果をリアルタイム送信
+              ws.send(JSON.stringify({ type: 'property_result', ...propResult }));
+
+              // Notionに保存
+              const results = propResult.hits?.flatMap(h => h.results) || propResult.results || [];
+              const platform = propResult.hits?.[0]?.platformId || propResult.platformId || 'parallel';
+              await saveBukakuResultToNotion(propResult.property, results, platform);
+
+              // ヒット時は学習
+              if (propResult.found && propResult.property?.management_company) {
+                const hitPlatform = propResult.hits?.[0]?.platformId || propResult.platformId;
+                if (hitPlatform) {
+                  learnMapping(propResult.property.management_company, hitPlatform);
+                }
+              }
+            },
+            onScreenshot: (screenshots) => {
+              ws.send(JSON.stringify({ type: 'screenshots', images: screenshots }));
+            }
+          });
+
+          ws.send(JSON.stringify({
+            type: 'fast_batch_complete',
+            results: result.results,
+            stats: result.stats
+          }));
+
+        } catch (error) {
+          console.error('[高速バッチ] エラー:', error);
+          ws.send(JSON.stringify({ type: 'error', message: error.message }));
+        }
+      }
+
+      // ブラウザプールステータス取得
+      if (data.type === 'get_pool_status') {
+        ws.send(JSON.stringify({
+          type: 'pool_status',
+          ...getPoolStatus()
+        }));
+      }
+
+      // ブラウザプール終了
+      if (data.type === 'shutdown_pool') {
+        console.log('[WebSocket] shutdown_pool受信');
+        await shutdownPool();
+        ws.send(JSON.stringify({ type: 'pool_shutdown', success: true }));
       }
     } catch (error) {
       console.error('[WebSocket] メッセージ処理エラー:', error);
@@ -1410,9 +1749,12 @@ app.delete('/api/companies/:name', (req, res) => {
  * 解析と物確を並行して実行
  * @param {WebSocket} ws
  * @param {string[]} pdfBase64List - Base64エンコードされたPDFデータの配列
+ * @param {Object} options - オプション
+ * @param {boolean} options.useFastSearch - 高速検索モード（ブラウザプール使用）
  */
-async function executePipelineBukaku(ws, pdfBase64List) {
-  console.log(`[パイプライン物確] 開始 (${pdfBase64List.length}ファイル)`);
+async function executePipelineBukaku(ws, pdfBase64List, options = {}) {
+  const { useFastSearch = false } = options;
+  console.log(`[パイプライン物確] 開始 (${pdfBase64List.length}ファイル, mode: ${useFastSearch ? 'FAST' : 'NORMAL'})`);
 
   const { mergePdfs } = require('./engine/pdf-splitter');
 
@@ -1430,7 +1772,8 @@ async function executePipelineBukaku(ws, pdfBase64List) {
 
   const pipeline = new BukakuPipeline({
     batchSize: 1,
-    batchWaitTime: 500
+    batchWaitTime: 500,
+    useFastSearch
   });
 
   // WebSocketにパイプラインを保存（キャンセル用）
@@ -1461,12 +1804,45 @@ async function executePipelineBukaku(ws, pdfBase64List) {
     }));
   });
 
-  pipeline.on('bukaku_progress', ({ completed, total, found }) => {
+  pipeline.on('bukaku_progress', ({ completed, total, found, remainingSeconds }) => {
     ws.send(JSON.stringify({
       type: 'bukaku_progress',
       completed,
       total,
-      found
+      found,
+      remainingSeconds
+    }));
+  });
+
+  // 検索計画通知
+  pipeline.on('search_plan', (plan) => {
+    ws.send(JSON.stringify({
+      type: 'search_plan',
+      ...plan
+    }));
+  });
+
+  // マッチング進捗通知（管理会社→プラットフォーム照合）
+  pipeline.on('matching_progress', (data) => {
+    ws.send(JSON.stringify({
+      type: 'matching_progress',
+      ...data
+    }));
+  });
+
+  // 空き発見通知
+  pipeline.on('vacancy_found', (data) => {
+    ws.send(JSON.stringify({
+      type: 'vacancy_found',
+      ...data
+    }));
+  });
+
+  // ステップ更新通知
+  pipeline.on('step_update', (data) => {
+    ws.send(JSON.stringify({
+      type: 'step_update',
+      ...data
     }));
   });
 
@@ -1526,7 +1902,8 @@ async function executePipelineBukaku(ws, pdfBase64List) {
     // パイプライン実行
     const stats = await pipeline.start(pdfBuffer, {
       searchMultipleOnPlatform,
-      parallelSearch
+      parallelSearch,
+      fastBatchSearch  // 高速検索モード用
     });
 
     ws.send(JSON.stringify({
@@ -1828,4 +2205,9 @@ async function executeSmartBukaku(ws, options) {
 server.listen(PORT, () => {
   console.log(`物確バックエンドサーバー起動: http://localhost:${PORT}`);
   console.log(`WebSocket: ws://localhost:${PORT}`);
+
+  // Notionキャッシュをバックグラウンドでプリロード（preparing時間短縮）
+  preloadNotionCache().catch(err => {
+    console.error('[起動時] Notionキャッシュプリロード失敗:', err.message);
+  });
 });

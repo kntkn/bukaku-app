@@ -1,16 +1,16 @@
 /**
- * 管理会社・プラットフォーム対応表管理モジュール
+ * 管理会社・プラットフォーム対応表管理モジュール（高速版）
  *
  * データソース:
- * - Notion DB: 学習データ（真実の源）
- * - ローカルJSON: 自社プラットフォーム持ち会社の固定マスタのみ
+ * - ローカルキャッシュ: 即座にロード（優先）
+ * - Notion DB: バックグラウンドで同期
  */
 
 const fs = require('fs');
 const path = require('path');
 const { Client } = require('@notionhq/client');
 
-// Notion クライアント（環境変数から初期化）
+// Notion クライアント
 let notionClient = null;
 function getNotionClient() {
   if (!notionClient && process.env.NOTION_TOKEN) {
@@ -19,12 +19,16 @@ function getNotionClient() {
   return notionClient;
 }
 
-// 同時書き込み防止用のロック（管理会社名 → Promise）
+// 同時書き込み防止用のロック
 const pendingSyncMap = new Map();
 
-const MAPPING_DB_ID = process.env.NOTION_MAPPING_DATABASE_ID || '2ed1c197-4dad-8149-a358-d07d58166746';
+// インメモリキャッシュ（管理会社名 → { platform, platformId }）
+let memoryCache = new Map();
+let cacheReady = false;
 
+const MAPPING_DB_ID = process.env.NOTION_MAPPING_DATABASE_ID || '2ed1c197-4dad-8149-a358-d07d58166746';
 const MAP_FILE = path.join(__dirname, '../../data/company-platform-map.json');
+const CACHE_FILE = path.join(__dirname, '../../data/notion-cache.json');
 
 // platformId → Notion選択肢名のマッピング
 const PLATFORM_DISPLAY_NAMES = {
@@ -45,13 +49,138 @@ const PLATFORM_DISPLAY_NAMES = {
   'tanaka_dk': '田中土建工業'
 };
 
-// Notion選択肢名 → platformIdの逆引きマッピング
+// Notion選択肢名 → platformIdの逆引き
 const PLATFORM_ID_FROM_NAME = Object.fromEntries(
   Object.entries(PLATFORM_DISPLAY_NAMES).map(([id, name]) => [name, id])
 );
 
 /**
- * 固定マスタを読み込む（自社プラットフォーム持ち会社のみ）
+ * 会社名を正規化
+ */
+function normalizeCompanyName(name) {
+  return name
+    .replace(/株式会社|有限会社|合同会社|㈱|㈲/g, '')
+    .replace(/\s+/g, '')
+    .trim();
+}
+
+/**
+ * ローカルキャッシュファイルから即座にロード
+ */
+function loadLocalCache() {
+  try {
+    if (fs.existsSync(CACHE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
+      const newCache = new Map();
+
+      for (const [name, info] of Object.entries(data.mappings || {})) {
+        newCache.set(name, info);
+        const normalized = normalizeCompanyName(name);
+        if (normalized !== name) {
+          newCache.set(normalized, info);
+        }
+      }
+
+      memoryCache = newCache;
+      cacheReady = true;
+      console.log(`[キャッシュ] ローカルから${newCache.size}件ロード完了`);
+      return true;
+    }
+  } catch (err) {
+    console.error('[キャッシュ] ローカルロードエラー:', err.message);
+  }
+  return false;
+}
+
+/**
+ * ローカルキャッシュファイルに保存
+ */
+function saveLocalCache() {
+  try {
+    const mappings = {};
+    for (const [name, info] of memoryCache) {
+      // 正規化名は保存しない（元の名前のみ）
+      if (!name.includes('株式会社') || name === normalizeCompanyName(name)) {
+        mappings[name] = info;
+      }
+    }
+
+    const dir = path.dirname(CACHE_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    fs.writeFileSync(CACHE_FILE, JSON.stringify({
+      updated: new Date().toISOString(),
+      count: Object.keys(mappings).length,
+      mappings
+    }, null, 2));
+
+    console.log(`[キャッシュ] ローカルに${Object.keys(mappings).length}件保存`);
+  } catch (err) {
+    console.error('[キャッシュ] ローカル保存エラー:', err.message);
+  }
+}
+
+/**
+ * Notionから全データを取得してキャッシュ更新
+ */
+async function syncFromNotion() {
+  const notion = getNotionClient();
+  if (!notion) return false;
+
+  console.log('[キャッシュ] Notionから同期開始...');
+  const startTime = Date.now();
+
+  try {
+    const newCache = new Map();
+    let hasMore = true;
+    let startCursor = undefined;
+
+    while (hasMore) {
+      const response = await notion.databases.query({
+        database_id: MAPPING_DB_ID,
+        start_cursor: startCursor,
+        page_size: 100
+      });
+
+      for (const page of response.results) {
+        const titleProp = page.properties['管理会社名'];
+        const platformProp = page.properties['プラットフォーム'];
+
+        if (titleProp?.title?.[0]?.plain_text && platformProp?.select?.name) {
+          const companyName = titleProp.title[0].plain_text;
+          const platformName = platformProp.select.name;
+          const platformId = PLATFORM_ID_FROM_NAME[platformName];
+
+          newCache.set(companyName, { platform: platformName, platformId });
+          const normalized = normalizeCompanyName(companyName);
+          if (normalized !== companyName) {
+            newCache.set(normalized, { platform: platformName, platformId });
+          }
+        }
+      }
+
+      hasMore = response.has_more;
+      startCursor = response.next_cursor;
+    }
+
+    memoryCache = newCache;
+    cacheReady = true;
+
+    // ローカルにも保存
+    saveLocalCache();
+
+    console.log(`[キャッシュ] Notion同期完了: ${newCache.size}件 (${Date.now() - startTime}ms)`);
+    return true;
+  } catch (err) {
+    console.error('[キャッシュ] Notion同期エラー:', err.message);
+    return false;
+  }
+}
+
+/**
+ * 固定マスタを読み込む
  */
 function loadKnownCompanies() {
   try {
@@ -59,95 +188,62 @@ function loadKnownCompanies() {
     const json = JSON.parse(data);
     return json.known_companies || {};
   } catch (error) {
-    console.error('固定マスタ読み込みエラー:', error.message);
     return {};
   }
 }
 
-/**
- * Notion DBから管理会社のプラットフォームを検索
- * @param {string} companyName - 管理会社名
- * @returns {Promise<Object|null>} { platform: string, platformId: string } or null
- */
-async function getPlatformFromNotion(companyName) {
-  console.log(`[Notion読込] 検索開始: "${companyName}"`);
-
-  const notion = getNotionClient();
-  if (!notion) {
-    console.log('[Notion読込] Notion未設定 (NOTION_TOKEN:', process.env.NOTION_TOKEN ? '設定あり' : '未設定', ')');
-    return null;
+// 固定マスタをメモリにキャッシュ
+let knownCompaniesCache = null;
+function getKnownCompanies() {
+  if (!knownCompaniesCache) {
+    knownCompaniesCache = loadKnownCompanies();
   }
-
-  try {
-    // 完全一致で検索
-    const exactMatch = await notion.databases.query({
-      database_id: MAPPING_DB_ID,
-      filter: {
-        property: '管理会社名',
-        title: { equals: companyName }
-      }
-    });
-
-    if (exactMatch.results.length > 0) {
-      const page = exactMatch.results[0];
-      const platformProp = page.properties['プラットフォーム'];
-      if (platformProp?.select?.name) {
-        const platformName = platformProp.select.name;
-        const platformId = PLATFORM_ID_FROM_NAME[platformName];
-        console.log(`[Notion読込] 完全一致: ${companyName} → ${platformName} (${platformId})`);
-        return { platform: platformName, platformId };
-      }
-    }
-
-    // 部分一致で検索（contains）
-    const partialMatch = await notion.databases.query({
-      database_id: MAPPING_DB_ID,
-      filter: {
-        property: '管理会社名',
-        title: { contains: normalizeCompanyName(companyName) }
-      }
-    });
-
-    if (partialMatch.results.length > 0) {
-      const page = partialMatch.results[0];
-      const platformProp = page.properties['プラットフォーム'];
-      if (platformProp?.select?.name) {
-        const platformName = platformProp.select.name;
-        const platformId = PLATFORM_ID_FROM_NAME[platformName];
-        console.log(`[Notion読込] 部分一致: ${companyName} → ${platformName} (${platformId})`);
-        return { platform: platformName, platformId };
-      }
-    }
-
-    console.log(`[Notion読込] 該当なし: ${companyName}`);
-    return null;
-  } catch (err) {
-    console.error('[Notion読込] エラー:', err.message);
-    return null;
-  }
+  return knownCompaniesCache;
 }
 
 /**
- * 管理会社名から推奨プラットフォームを取得
- * 検索順序: Notion → 固定マスタ（自社プラットフォーム持ち）
- * @param {string} companyName - 管理会社名
- * @returns {Promise<Object>} { platforms: string[], confidence: 'high'|'medium'|'none', source: string }
+ * キャッシュからプラットフォームを検索（同期的・高速）
  */
-async function getPlatformsForCompany(companyName) {
-  // 1. まずNotionを確認（真実の源）
-  const notionResult = await getPlatformFromNotion(companyName);
-  if (notionResult && notionResult.platformId) {
+function getPlatformFromCache(companyName) {
+  // 完全一致
+  if (memoryCache.has(companyName)) {
+    return memoryCache.get(companyName);
+  }
+
+  // 正規化一致
+  const normalized = normalizeCompanyName(companyName);
+  if (memoryCache.has(normalized)) {
+    return memoryCache.get(normalized);
+  }
+
+  // 部分一致（キャッシュ内を走査）
+  for (const [cachedName, result] of memoryCache) {
+    if (cachedName.includes(normalized) || normalized.includes(cachedName)) {
+      return result;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * 管理会社名から推奨プラットフォームを取得（同期的・高速）
+ */
+function getPlatformsForCompanySync(companyName) {
+  // 1. キャッシュから検索
+  const cached = getPlatformFromCache(companyName);
+  if (cached && cached.platformId) {
     return {
-      platforms: [notionResult.platformId],
+      platforms: [cached.platformId],
       confidence: 'high',
-      source: 'notion'
+      source: 'cache'
     };
   }
 
-  // 2. Notionになければ固定マスタをチェック（自社プラットフォーム持ち会社）
-  const knownCompanies = loadKnownCompanies();
+  // 2. 固定マスタから検索
+  const knownCompanies = getKnownCompanies();
+  const normalizedInput = normalizeCompanyName(companyName);
 
-  // 2a. 部分一致でチェック
   for (const [knownName, info] of Object.entries(knownCompanies)) {
     if (companyName.includes(knownName) || knownName.includes(companyName)) {
       return {
@@ -157,11 +253,6 @@ async function getPlatformsForCompany(companyName) {
         note: info.note
       };
     }
-  }
-
-  // 2b. 正規化して再チェック
-  const normalizedInput = normalizeCompanyName(companyName);
-  for (const [knownName, info] of Object.entries(knownCompanies)) {
     if (normalizeCompanyName(knownName) === normalizedInput) {
       return {
         platforms: info.platforms,
@@ -172,7 +263,6 @@ async function getPlatformsForCompany(companyName) {
     }
   }
 
-  // 3. 見つからない場合
   return {
     platforms: [],
     confidence: 'none',
@@ -181,117 +271,71 @@ async function getPlatformsForCompany(companyName) {
 }
 
 /**
- * 会社名を正規化（株式会社などを除去）
+ * 管理会社名から推奨プラットフォームを取得（互換性維持）
  */
-function normalizeCompanyName(name) {
-  return name
-    .replace(/株式会社|有限会社|合同会社|㈱|㈲/g, '')
-    .replace(/\s+/g, '')
-    .trim();
+async function getPlatformsForCompany(companyName) {
+  return getPlatformsForCompanySync(companyName);
 }
 
 /**
- * Notionに学習結果を保存（新規のみ）
- * 同時書き込み防止のためロックを使用
- * @param {string} companyName - 管理会社名
- * @param {string} platformId - ヒットしたプラットフォームID
+ * Notionに学習結果を保存
  */
 async function syncToNotion(companyName, platformId) {
   const notion = getNotionClient();
-  if (!notion) {
-    console.log('[学習] Notion未設定のためスキップ');
-    return;
-  }
+  if (!notion) return;
 
-  // 同じ会社名で処理中の場合は待機してスキップ
   if (pendingSyncMap.has(companyName)) {
-    console.log(`[学習/Notion] ${companyName} は処理中のためスキップ`);
-    try {
-      await pendingSyncMap.get(companyName);
-    } catch (e) {
-      // 先行処理のエラーは無視
-    }
+    try { await pendingSyncMap.get(companyName); } catch {}
     return;
   }
 
-  // ロックを取得して処理開始
-  const syncPromise = doSyncToNotion(companyName, platformId);
-  pendingSyncMap.set(companyName, syncPromise);
+  const syncPromise = (async () => {
+    try {
+      const existing = await notion.databases.query({
+        database_id: MAPPING_DB_ID,
+        filter: { property: '管理会社名', title: { equals: companyName } }
+      });
 
-  try {
-    await syncPromise;
-  } finally {
-    pendingSyncMap.delete(companyName);
-  }
-}
+      if (existing.results.length > 0) return;
 
-/**
- * 実際のNotion同期処理（内部関数）
- * ※Notionが真実の源なので、既存レコードがある場合は更新しない
- */
-async function doSyncToNotion(companyName, platformId) {
-  const notion = getNotionClient();
+      const platformName = PLATFORM_DISPLAY_NAMES[platformId];
+      await notion.pages.create({
+        parent: { database_id: MAPPING_DB_ID },
+        properties: {
+          '管理会社名': { title: [{ text: { content: companyName } }] },
+          'プラットフォーム': platformName ? { select: { name: platformName } } : { select: null }
+        }
+      });
 
-  try {
-    // 既存レコードを検索
-    const existing = await notion.databases.query({
-      database_id: MAPPING_DB_ID,
-      filter: {
-        property: '管理会社名',
-        title: { equals: companyName }
-      }
-    });
+      // メモリキャッシュにも追加
+      memoryCache.set(companyName, { platform: platformName, platformId });
+      memoryCache.set(normalizeCompanyName(companyName), { platform: platformName, platformId });
 
-    if (existing.results.length > 0) {
-      // Notionに既存レコードがある場合は更新しない
-      console.log(`[学習/Notion] スキップ: ${companyName} は既にNotionに登録済み`);
-      return;
+      console.log(`[学習] 新規登録: ${companyName} → ${platformName}`);
+    } catch (err) {
+      console.error('[学習] エラー:', err.message);
     }
+  })();
 
-    // 新規作成のみ実行
-    const platformName = PLATFORM_DISPLAY_NAMES[platformId];
-    const properties = {
-      '管理会社名': { title: [{ text: { content: companyName } }] },
-      'プラットフォーム': platformName ? { select: { name: platformName } } : { select: null }
-    };
-
-    await notion.pages.create({
-      parent: { database_id: MAPPING_DB_ID },
-      properties
-    });
-    console.log(`[学習/Notion] 新規登録: ${companyName} → ${platformName}`);
-  } catch (err) {
-    console.error('[学習/Notion] エラー:', err.message);
-    throw err;
-  }
+  pendingSyncMap.set(companyName, syncPromise);
+  try { await syncPromise; } finally { pendingSyncMap.delete(companyName); }
 }
 
 /**
- * 物確結果を学習（Notionに保存）
- * @param {string} companyName - 管理会社名
- * @param {string} platformId - ヒットしたプラットフォームID
+ * 物確結果を学習
  */
 function learnMapping(companyName, platformId) {
   if (!companyName || !platformId) return;
-
-  console.log(`[学習] ${companyName} → ${platformId}`);
-
-  // Notionに同期（非同期）- 未登録の場合のみ新規作成
-  syncToNotion(companyName, platformId).catch((err) => {
-    console.error('[学習] Notion同期失敗:', err.message);
-  });
+  syncToNotion(companyName, platformId).catch(() => {});
 }
 
 /**
- * 検索優先順位を決定
- * @param {string} companyName - 管理会社名（nullなら全プラットフォーム）
- * @returns {Promise<Object>} { strategy: 'single'|'parallel', platforms: string[], source: string }
+ * 検索戦略を決定（同期的・高速）
  */
-async function getSearchStrategy(companyName) {
+function getSearchStrategySync(companyName) {
   const { credentials } = require('./parallel-searcher');
 
   if (!companyName) {
-    // 管理会社不明 → 全プラットフォーム並列検索
     return {
       strategy: 'parallel',
       platforms: credentials.priority,
@@ -299,11 +343,9 @@ async function getSearchStrategy(companyName) {
     };
   }
 
-  const result = await getPlatformsForCompany(companyName);
+  const result = getPlatformsForCompanySync(companyName);
 
   if (result.confidence === 'high' && result.platforms.length > 0) {
-    // 高確度で特定 → そのプラットフォームのみ
-    console.log(`[戦略] ${companyName} → single (${result.platforms.join(', ')}) [${result.source}]`);
     return {
       strategy: 'single',
       platforms: result.platforms,
@@ -311,9 +353,7 @@ async function getSearchStrategy(companyName) {
       confidence: result.confidence
     };
   } else if (result.confidence === 'medium' && result.platforms.length > 0) {
-    // 中確度 → 推奨プラットフォームを先頭にして並列
     const others = credentials.priority.filter(p => !result.platforms.includes(p));
-    console.log(`[戦略] ${companyName} → parallel (優先: ${result.platforms.join(', ')}) [${result.source}]`);
     return {
       strategy: 'parallel',
       platforms: [...result.platforms, ...others],
@@ -321,8 +361,6 @@ async function getSearchStrategy(companyName) {
       confidence: result.confidence
     };
   } else {
-    // 不明 → 全プラットフォーム並列
-    console.log(`[戦略] ${companyName} → parallel (全検索) [not_found]`);
     return {
       strategy: 'parallel',
       platforms: credentials.priority,
@@ -332,19 +370,59 @@ async function getSearchStrategy(companyName) {
 }
 
 /**
+ * 検索戦略を決定（互換性維持）
+ */
+async function getSearchStrategy(companyName) {
+  return getSearchStrategySync(companyName);
+}
+
+/**
  * 統計情報を取得
  */
 function getStats() {
-  const knownCompanies = loadKnownCompanies();
   return {
-    known_companies: Object.keys(knownCompanies).length
+    known_companies: Object.keys(getKnownCompanies()).length,
+    cached_companies: memoryCache.size,
+    cache_ready: cacheReady
   };
+}
+
+/**
+ * キャッシュをプリロード（サーバー起動時に呼び出し）
+ */
+async function preloadNotionCache() {
+  // 1. まずローカルから即座にロード
+  const localLoaded = loadLocalCache();
+
+  // 2. バックグラウンドでNotionから同期（最新化）
+  if (localLoaded) {
+    // ローカルロード成功 → 非同期でNotion同期
+    syncFromNotion().catch(err => {
+      console.error('[キャッシュ] Notion同期失敗:', err.message);
+    });
+  } else {
+    // ローカルなし → Notionから同期を待つ
+    await syncFromNotion();
+  }
+}
+
+/**
+ * 複数物件の戦略を一括取得（超高速）
+ */
+function getSearchStrategiesBatch(properties) {
+  return properties.map(p => ({
+    property: p,
+    strategy: getSearchStrategySync(p.management_company)
+  }));
 }
 
 module.exports = {
   getPlatformsForCompany,
   learnMapping,
   getSearchStrategy,
+  getSearchStrategySync,
+  getSearchStrategiesBatch,
   getStats,
-  loadKnownCompanies
+  loadKnownCompanies,
+  preloadNotionCache
 };

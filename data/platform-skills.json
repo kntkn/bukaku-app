@@ -4,26 +4,24 @@
     "comment": "itandibb.com/topにアクセス→未ログインならitandi-accounts.comにリダイレクト",
     "login": {
       "steps": [
-        { "action": "wait", "ms": 3000 },
-        { "action": "waitFor", "selector": "input#email", "timeout": 10000 },
+        { "action": "waitFor", "selector": "input#email", "timeout": 5000 },
         { "action": "fill", "selector": "input#email", "value": "${email}" },
         { "action": "fill", "selector": "input#password", "value": "${password}" },
         { "action": "click", "selector": "input[type='submit']" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "selector": "text=リスト検索", "timeout": 5000 }
       ],
       "successCheck": { "urlContains": "itandibb.com", "urlNotContains": ["login", "itandi-accounts"] }
     },
     "search": {
       "preSteps": [
-        { "action": "waitFor", "selector": "text=リスト検索", "timeout": 10000 },
+        { "action": "waitFor", "selector": "text=リスト検索", "timeout": 5000 },
         { "action": "click", "selector": "text=リスト検索", "index": 0 },
-        { "action": "wait", "ms": 3000 }
+        { "action": "smartWait", "selector": "input[name='building_name:match']", "timeout": 5000 }
       ],
       "steps": [
-        { "action": "waitFor", "selector": "input[name='building_name:match']", "timeout": 10000 },
         { "action": "fill", "selector": "input[name='building_name:match']", "value": "${propertyName}" },
         { "action": "click", "selector": "button[type='submit']" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "selector": ".itandi-bb-ui__Box", "timeout": 5000 }
       ],
       "roomNumberSteps": [
         { "action": "fill", "selector": "input[name='room_number:match'], input[name='room_no'], input[placeholder*='部屋'], input[placeholder*='号室']", "value": "${roomNumber}", "optional": true }
@@ -38,7 +36,8 @@
         "adPatterns": ["広告費", "AD"],
         "adSelector": ".itandi-bb-ui__Flex.css-yj0ebl > span:first-child",
         "adComment": "部屋行の最終カラム内、最初のspan=AD値（なし/100%等）",
-        "viewingPatterns": ["内見可", "即内見"]
+        "viewingPatterns": ["内見可", "即内見"],
+        "applicationBadgeSelector": "[class*='MuiBadge-badge']"
       }
     }
   },
@@ -47,22 +46,22 @@
     "comment": "ログイン後/ielovebb/top/に遷移、input#renmで物件名検索",
     "login": {
       "steps": [
-        { "action": "waitFor", "selector": "input[placeholder='ログインIDを入力']", "timeout": 15000 },
+        { "action": "waitFor", "selector": "input[placeholder='ログインIDを入力']", "timeout": 5000 },
         { "action": "fill", "selector": "input[placeholder='ログインIDを入力']", "value": "${email}" },
         { "action": "fill", "selector": "input[placeholder='パスワードを入力']", "value": "${password}" },
         { "action": "click", "selector": "input#loginButton" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "selector": "input#renm", "timeout": 5000 }
       ],
       "successCheck": { "urlNotContains": ["login"] }
     },
     "search": {
       "preSteps": [
-        { "action": "waitFor", "selector": "input#renm", "timeout": 10000 }
+        { "action": "waitFor", "selector": "input#renm", "timeout": 5000 }
       ],
       "steps": [
         { "action": "fill", "selector": "input#renm", "value": "${propertyName}" },
         { "action": "click", "selector": "button#freeBknSearch" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "selector": "tbody.bkn-clickable-area", "timeout": 5000 }
       ],
       "resultSelector": "tbody.bkn-clickable-area",
       "resultExtraction": {
@@ -84,11 +83,11 @@
     "complexNavigation": true,
     "login": {
       "steps": [
-        { "action": "waitFor", "selector": "input#loginFormText", "timeout": 15000 },
+        { "action": "waitFor", "selector": "input#loginFormText", "timeout": 5000 },
         { "action": "fill", "selector": "input#loginFormText", "value": "${id}" },
         { "action": "fill", "selector": "input#passFormText", "value": "${password}" },
         { "action": "click", "selector": "input#loginSubmit" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "timeout": 3000 }
       ],
       "successCheck": { "urlContains": "portal" }
     },
@@ -103,14 +102,13 @@
     "complexNavigation": true,
     "login": {
       "steps": [
-        { "action": "waitFor", "selector": "button:has-text('いい生活アカウントでログイン')", "timeout": 15000 },
+        { "action": "waitFor", "selector": "button:has-text('いい生活アカウントでログイン')", "timeout": 5000 },
         { "action": "click", "selector": "button:has-text('いい生活アカウントでログイン')" },
-        { "action": "wait", "ms": 3000 },
-        { "action": "waitFor", "selector": "input#username", "timeout": 15000 },
+        { "action": "smartWait", "selector": "input#username", "timeout": 5000 },
         { "action": "fill", "selector": "input#username", "value": "${email}" },
         { "action": "fill", "selector": "input#password", "value": "${password}" },
         { "action": "click", "selector": "button[name='action']" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "timeout": 3000 }
       ],
       "successCheck": { "urlContains": "es-square.net" }
     },
@@ -124,24 +122,23 @@
     "comment": "goweb.work framework - /rentals/searchで建物名検索",
     "login": {
       "steps": [
-        { "action": "waitFor", "selector": "input#AccountLoginid", "timeout": 15000 },
+        { "action": "waitFor", "selector": "input#AccountLoginid", "timeout": 5000 },
         { "action": "fill", "selector": "input#AccountLoginid", "value": "${id}" },
         { "action": "fill", "selector": "input#AccountPassword", "value": "${password}" },
         { "action": "click", "selector": "input[type='submit']" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "timeout": 3000 }
       ],
       "successCheck": { "urlNotContains": ["login"] }
     },
     "search": {
       "preSteps": [
         { "action": "goto", "url": "https://ab.100kadou.net/rentals/search" },
-        { "action": "wait", "ms": 2000 },
-        { "action": "waitFor", "selector": "input#SearchBuildingName", "timeout": 10000 }
+        { "action": "smartWait", "selector": "input#SearchBuildingName", "timeout": 5000 }
       ],
       "steps": [
         { "action": "fill", "selector": "input#SearchBuildingName", "value": "${propertyName}" },
         { "action": "click", "selector": "input[type='submit'][value='検索'], form input[type='submit']" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "selector": "table.table tbody tr", "timeout": 5000 }
       ],
       "resultSelector": "table.table tbody tr, .rental-list tr, .property-item",
       "resultExtraction": {
@@ -162,24 +159,23 @@
     "comment": "goweb.work framework - /rentals/searchで建物名検索",
     "login": {
       "steps": [
-        { "action": "waitFor", "selector": "input#AccountLoginid", "timeout": 15000 },
+        { "action": "waitFor", "selector": "input#AccountLoginid", "timeout": 5000 },
         { "action": "fill", "selector": "input#AccountLoginid", "value": "${id}" },
         { "action": "fill", "selector": "input#AccountPassword", "value": "${password}" },
         { "action": "click", "selector": "input[type='submit']" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "timeout": 3000 }
       ],
       "successCheck": { "urlNotContains": ["login"] }
     },
     "search": {
       "preSteps": [
         { "action": "goto", "url": "https://shimadahouse.goweb.work/rentals/search" },
-        { "action": "wait", "ms": 2000 },
-        { "action": "waitFor", "selector": "input#SearchBuildingName", "timeout": 10000 }
+        { "action": "smartWait", "selector": "input#SearchBuildingName", "timeout": 5000 }
       ],
       "steps": [
         { "action": "fill", "selector": "input#SearchBuildingName", "value": "${propertyName}" },
         { "action": "click", "selector": "input[type='submit'][value='検索'], form input[type='submit']" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "selector": "table.table tbody tr", "timeout": 5000 }
       ],
       "resultSelector": "table.table tbody tr, .rental-list tr, .property-item",
       "resultExtraction": {
@@ -200,24 +196,23 @@
     "comment": "goweb.work framework - /rentals/searchで建物名検索",
     "login": {
       "steps": [
-        { "action": "waitFor", "selector": "input#AccountLoginid", "timeout": 15000 },
+        { "action": "waitFor", "selector": "input#AccountLoginid", "timeout": 5000 },
         { "action": "fill", "selector": "input#AccountLoginid", "value": "${id}" },
         { "action": "fill", "selector": "input#AccountPassword", "value": "${password}" },
         { "action": "click", "selector": "input[type='submit']" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "timeout": 3000 }
       ],
       "successCheck": { "urlNotContains": ["login"] }
     },
     "search": {
       "preSteps": [
         { "action": "goto", "url": "https://ja-amenityhouse.goweb.work/rentals/search" },
-        { "action": "wait", "ms": 2000 },
-        { "action": "waitFor", "selector": "input#SearchBuildingName", "timeout": 10000 }
+        { "action": "smartWait", "selector": "input#SearchBuildingName", "timeout": 5000 }
       ],
       "steps": [
         { "action": "fill", "selector": "input#SearchBuildingName", "value": "${propertyName}" },
         { "action": "click", "selector": "input[type='submit'][value='検索'], form input[type='submit']" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "selector": "table.table tbody tr", "timeout": 5000 }
       ],
       "resultSelector": "table.table tbody tr, .rental-list tr, .property-item",
       "resultExtraction": {
@@ -238,22 +233,22 @@
     "comment": "bukkaku.jp framework - ログイン後/agent/search/by_areaに遷移、address_nameで検索",
     "login": {
       "steps": [
-        { "action": "waitFor", "selector": "input#account", "timeout": 15000 },
+        { "action": "waitFor", "selector": "input#account", "timeout": 5000 },
         { "action": "fill", "selector": "input#account", "value": "${id}" },
         { "action": "fill", "selector": "input#password", "value": "${password}" },
         { "action": "click", "selector": "button[type='submit']" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "selector": "input#address_name", "timeout": 5000 }
       ],
       "successCheck": { "urlNotContains": ["login"] }
     },
     "search": {
       "preSteps": [
-        { "action": "waitFor", "selector": "input#address_name", "timeout": 10000 }
+        { "action": "waitFor", "selector": "input#address_name", "timeout": 5000 }
       ],
       "steps": [
         { "action": "fill", "selector": "input#address_name", "value": "${propertyName}" },
         { "action": "click", "selector": "input#btn_search" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "selector": "table.result tbody tr", "timeout": 5000 }
       ],
       "resultSelector": "table.result tbody tr, .property-list tr, .room-item",
       "resultExtraction": {
@@ -274,22 +269,22 @@
     "comment": "bukkaku.jp framework - ログイン後/agent/search/by_areaに遷移、address_nameで検索",
     "login": {
       "steps": [
-        { "action": "waitFor", "selector": "input#account", "timeout": 15000 },
+        { "action": "waitFor", "selector": "input#account", "timeout": 5000 },
         { "action": "fill", "selector": "input#account", "value": "${id}" },
         { "action": "fill", "selector": "input#password", "value": "${password}" },
         { "action": "click", "selector": "button[type='submit']" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "selector": "input#address_name", "timeout": 5000 }
       ],
       "successCheck": { "urlNotContains": ["login"] }
     },
     "search": {
       "preSteps": [
-        { "action": "waitFor", "selector": "input#address_name", "timeout": 10000 }
+        { "action": "waitFor", "selector": "input#address_name", "timeout": 5000 }
       ],
       "steps": [
         { "action": "fill", "selector": "input#address_name", "value": "${propertyName}" },
         { "action": "click", "selector": "input#btn_search" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "selector": "table.result tbody tr", "timeout": 5000 }
       ],
       "resultSelector": "table.result tbody tr, .property-list tr, .room-item",
       "resultExtraction": {
@@ -311,11 +306,11 @@
     "complexNavigation": true,
     "login": {
       "steps": [
-        { "action": "waitFor", "selector": "input#LoginId", "timeout": 15000 },
+        { "action": "waitFor", "selector": "input#LoginId", "timeout": 5000 },
         { "action": "fill", "selector": "input#LoginId", "value": "${email}" },
         { "action": "fill", "selector": "input#PassWord", "value": "${password}" },
         { "action": "click", "selector": "input#btnLogin" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "timeout": 3000 }
       ],
       "successCheck": { "urlContains": "PropertyInformation" }
     },
@@ -329,24 +324,23 @@
     "comment": "ログイン後/entry/application/roomlistに遷移、absearchで検索",
     "login": {
       "steps": [
-        { "action": "waitFor", "selector": "input#email", "timeout": 15000 },
+        { "action": "waitFor", "selector": "input#email", "timeout": 5000 },
         { "action": "fill", "selector": "input#email", "value": "${email}" },
         { "action": "fill", "selector": "input#password", "value": "${password}" },
         { "action": "click", "selector": "button[type='submit']" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "timeout": 3000 }
       ],
       "successCheck": { "urlNotContains": ["login"] }
     },
     "search": {
       "preSteps": [
         { "action": "goto", "url": "https://kintarou-nyukyo.com/entry/application/roomlist" },
-        { "action": "wait", "ms": 2000 },
-        { "action": "waitFor", "selector": "input[name='absearch']", "timeout": 10000 }
+        { "action": "smartWait", "selector": "input[name='absearch']", "timeout": 5000 }
       ],
       "steps": [
         { "action": "fill", "selector": "input[name='absearch']", "value": "${propertyName}" },
         { "action": "click", "selector": "input[type='submit']" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "selector": "table tbody tr", "timeout": 5000 }
       ],
       "resultSelector": "table tbody tr, .room-list tr, .property-item",
       "resultExtraction": {
@@ -368,12 +362,12 @@
     "complexNavigation": true,
     "login": {
       "steps": [
-        { "action": "waitFor", "selector": "input#member_id", "timeout": 15000 },
+        { "action": "waitFor", "selector": "input#member_id", "timeout": 5000 },
         { "action": "fill", "selector": "input#member_id", "value": "${id}" },
         { "action": "fill", "selector": "input#user_id", "value": "${userId}" },
         { "action": "fill", "selector": "input#password", "value": "${password}" },
         { "action": "click", "selector": "button.login-form__button--login" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "timeout": 3000 }
       ],
       "successCheck": { "urlContains": "service" }
     },
@@ -387,22 +381,22 @@
     "comment": "ログイン後search.phpに遷移、building_nameで検索（Enterキーで送信）",
     "login": {
       "steps": [
-        { "action": "waitFor", "selector": "input[name='login_id']", "timeout": 15000 },
+        { "action": "waitFor", "selector": "input[name='login_id']", "timeout": 5000 },
         { "action": "fill", "selector": "input[name='login_id']", "value": "${id}" },
         { "action": "fill", "selector": "input[name='password']", "value": "${password}" },
         { "action": "click", "selector": "input[type='image']" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "selector": "input[name='building_name']", "timeout": 5000 }
       ],
       "successCheck": { "urlContains": "search.php" }
     },
     "search": {
       "preSteps": [
-        { "action": "waitFor", "selector": "input[name='building_name']", "timeout": 10000 }
+        { "action": "waitFor", "selector": "input[name='building_name']", "timeout": 5000 }
       ],
       "steps": [
         { "action": "fill", "selector": "input[name='building_name']", "value": "${propertyName}" },
         { "action": "pressKey", "key": "Enter" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "selector": "table tbody tr", "timeout": 5000 }
       ],
       "resultSelector": "table tbody tr, .property-list tr, .room-item",
       "resultExtraction": {
@@ -424,11 +418,11 @@
     "rpaProhibited": true,
     "login": {
       "steps": [
-        { "action": "waitFor", "selector": "input[name='login_id']", "timeout": 15000 },
+        { "action": "waitFor", "selector": "input[name='login_id']", "timeout": 5000 },
         { "action": "fill", "selector": "input[name='login_id']", "value": "${id}" },
         { "action": "fill", "selector": "input[name='password']", "value": "${password}" },
         { "action": "click", "selector": "div.login_button" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "timeout": 3000 }
       ],
       "successCheck": { "urlNotContains": ["login"] }
     },
@@ -442,25 +436,24 @@
     "comment": "ログイン後支店選択画面→本社クリック→物件一覧、search_article_nameで検索",
     "login": {
       "steps": [
-        { "action": "waitFor", "selector": "input#managerid", "timeout": 15000 },
+        { "action": "waitFor", "selector": "input#managerid", "timeout": 5000 },
         { "action": "fill", "selector": "input#managerid", "value": "${id}" },
         { "action": "fill", "selector": "input#managerpass", "value": "${password}" },
         { "action": "click", "selector": "button[type='submit']" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "selector": "text=本社", "timeout": 5000 }
       ],
       "successCheck": { "urlContains": "siten_select" }
     },
     "search": {
       "preSteps": [
-        { "action": "waitFor", "selector": "text=本社", "timeout": 10000 },
+        { "action": "waitFor", "selector": "text=本社", "timeout": 5000 },
         { "action": "click", "selector": "text=本社" },
-        { "action": "wait", "ms": 3000 },
-        { "action": "waitFor", "selector": "input[name='search_article_name']", "timeout": 10000 }
+        { "action": "smartWait", "selector": "input[name='search_article_name']", "timeout": 5000 }
       ],
       "steps": [
         { "action": "fill", "selector": "input[name='search_article_name']", "value": "${propertyName}" },
         { "action": "click", "selector": "button:has-text('検索')" },
-        { "action": "wait", "ms": 5000 }
+        { "action": "smartWait", "selector": "table tbody tr", "timeout": 5000 }
       ],
       "resultSelector": "table tbody tr, .article-list tr",
       "resultExtraction": {
