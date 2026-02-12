@@ -3,11 +3,8 @@ FROM node:20-bookworm-slim
 
 WORKDIR /app
 
-# Chromiumの依存ライブラリ + 日本語フォント
+# 日本語フォント + curl（Chromium依存は playwright install --with-deps で自動追加）
 RUN apt-get update && apt-get install -y \
-    libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
-    libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
-    libgbm1 libpango-1.0-0 libcairo2 libasound2 libxshmfence1 \
     fonts-ipafont-gothic fonts-noto-cjk \
     curl \
     --no-install-recommends && \
@@ -17,8 +14,8 @@ RUN apt-get update && apt-get install -y \
 COPY package*.json ./
 RUN npm ci --omit=dev 2>/dev/null || npm install --omit=dev
 
-# Playwright Chromiumのみインストール（Firefoxなどは不要）
-RUN npx playwright install chromium
+# Playwright Chromiumのみインストール（--with-depsでOS依存ライブラリも自動追加）
+RUN npx playwright install --with-deps chromium
 
 # ソースコードコピー
 COPY server/ ./server/

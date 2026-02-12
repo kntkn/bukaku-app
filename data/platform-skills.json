@@ -98,7 +98,7 @@
   },
   "essquare": {
     "name": "いい物件",
-    "comment": "React/MUI SPA。検索UIが動的生成のため標準セレクタが機能しない。追加調査が必要",
+    "comment": "React/MUI SPA。OAuth経由でes-account.comにリダイレクト後、es-square.netに戻る",
     "complexNavigation": true,
     "login": {
       "steps": [
@@ -108,9 +108,10 @@
         { "action": "fill", "selector": "input#username", "value": "${email}" },
         { "action": "fill", "selector": "input#password", "value": "${password}" },
         { "action": "click", "selector": "button[name='action']" },
-        { "action": "smartWait", "timeout": 3000 }
+        { "action": "smartWait", "timeout": 5000 },
+        { "action": "goto", "url": "https://rent.es-square.net/" }
       ],
-      "successCheck": { "urlContains": "es-square.net" }
+      "successCheck": { "urlNotContains": ["login", "es-account.com"] }
     },
     "search": {
       "comment": "MUIベースのSPA。検索入力のセレクタが動的。追加調査が必要",

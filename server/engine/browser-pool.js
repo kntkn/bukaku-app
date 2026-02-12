@@ -196,16 +196,21 @@ class BrowserPool {
     const { page, platform } = entry;
 
     try {
-      // ログインページへ
-      await page.goto(platform.loginUrl, { waitUntil: 'networkidle', timeout: 60000 });
+      // ログインページへ（domcontentloadedで十分。networkidleだとRailway環境でタイムアウトしやすい）
+      await page.goto(platform.loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await page.waitForTimeout(2000);
 
-      // 既にログイン済みかチェック（ログインページにリダイレクトされていない）
-      const url = page.url();
-      const isLoginPage = url.includes('login') || url.includes('signin') || url.includes('auth');
+      // 既にログイン済みかチェック
+      // 注意: loginUrlと同じURL（or loginを含むURL）にいる場合のみログイン実行
+      // セッション復元で別ページにリダイレクトされた場合はスキップ
+      const currentUrl = page.url();
+      const loginUrl = platform.loginUrl;
+      const isStillOnLoginPage = currentUrl === loginUrl ||
+        currentUrl.includes('login') || currentUrl.includes('signin') || currentUrl.includes('auth') ||
+        currentUrl.replace(/\/$/, '') === loginUrl.replace(/\/$/, '');
 
-      if (!isLoginPage) {
-        console.log(`[BrowserPool] ${platformId}: セッション有効、ログイン不要`);
+      if (!isStillOnLoginPage) {
+        console.log(`[BrowserPool] ${platformId}: セッション有効、ログイン不要 (${currentUrl})`);
         entry.loggedIn = true;
         return true;
       }
