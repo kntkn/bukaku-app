@@ -198,7 +198,7 @@ async function setupRender() {
       if (keyInputs2.length > 0) {
         await keyInputs2[keyInputs2.length - 1].fill('ITANDI_PASSWORD');
         if (valueInputs2.length > 0) {
-          await valueInputs2[valueInputs2.length - 1].fill('funt0406');
+          await valueInputs2[valueInputs2.length - 1].fill(process.env.ITANDI_PASSWORD || '');
         }
         console.log('✓ ITANDI_PASSWORD を設定');
       }

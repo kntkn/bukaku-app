@@ -184,10 +184,16 @@ function getUsers() {
       return JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8'));
     }
   } catch (e) {}
-  // デフォルトユーザー（初期設定用）
+  // デフォルトユーザー（環境変数から取得）
   return {
     users: [
-      { id: '1', email: 'info@fun-t.jp', password: 'funt0406', role: 'admin', name: 'Admin' }
+      {
+        id: '1',
+        email: process.env.ADMIN_EMAIL || 'admin@example.com',
+        password: process.env.ADMIN_PASSWORD || 'changeme',
+        role: 'admin',
+        name: 'Admin'
+      }
     ]
   };
 }
@@ -661,8 +667,8 @@ async function executeBukaku(ws, session, sessionId) {
   const skill = yaml.parse(fs.readFileSync(skillPath, 'utf-8'));
 
   const CREDENTIALS = {
-    email: process.env.ITANDI_EMAIL || 'info@fun-t.jp',
-    password: process.env.ITANDI_PASSWORD || 'funt0406'
+    email: process.env.ITANDI_EMAIL || '',
+    password: process.env.ITANDI_PASSWORD || ''
   };
 
   // ステータス送信ヘルパー
