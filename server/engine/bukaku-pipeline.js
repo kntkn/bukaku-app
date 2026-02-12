@@ -186,16 +186,17 @@ class BukakuPipeline extends EventEmitter {
       return;
     }
 
+    const properties = [...this.propertyQueue];
+
+    // 検索計画を即座に作成・通知（同期的・ミリ秒レベル）
+    // UIが「matching platforms...」で止まらないよう、ウォームアップ待機より先に実行
+    await this.createAndEmitSearchPlan(properties);
+    this.propertyQueue = [];
+
     // ★ ブラウザウォームアップ完了を待機（解析と並列で既に開始済み）
     if (this.browserWarmupPromise) {
       await this.browserWarmupPromise;
     }
-
-    const properties = [...this.propertyQueue];
-
-    // 検索計画を作成して通知（ウォームアップ完了後なので即座に検索開始可能）
-    await this.createAndEmitSearchPlan(properties);
-    this.propertyQueue = [];
 
     console.log(`[パイプライン] 高速バッチ検索開始: ${properties.length}件`);
 
