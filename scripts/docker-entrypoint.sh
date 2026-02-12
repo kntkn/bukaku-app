@@ -3,7 +3,7 @@ set -e
 
 # CREDENTIALS_JSON 環境変数からcredentials.jsonを生成
 if [ -n "$CREDENTIALS_JSON" ]; then
-  echo "$CREDENTIALS_JSON" > /app/data/credentials.json
+  printf '%s\n' "$CREDENTIALS_JSON" > /app/data/credentials.json
   echo "[entrypoint] credentials.json を環境変数から生成しました"
 else
   if [ ! -f /app/data/credentials.json ]; then

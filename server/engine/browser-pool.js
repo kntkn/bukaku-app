@@ -8,9 +8,14 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 
-// 認証情報を読み込み
+// 認証情報を読み込み（ファイルがなければ空のデフォルト）
 const credentialsPath = path.join(__dirname, '../../data/credentials.json');
-const credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf-8'));
+let credentials = { priority: [], platforms: {} };
+try {
+  credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf-8'));
+} catch (e) {
+  console.warn('[browser-pool] credentials.json not found or invalid, using empty defaults:', e.message);
+}
 
 // セッション保存ディレクトリ
 const SESSION_DIR = path.join(__dirname, '../../data/sessions');

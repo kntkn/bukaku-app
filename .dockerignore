@@ -7,5 +7,8 @@ node_modules
 .vercel
 .DS_Store
 tests/
+data/credentials.json
+data/sessions/
+data/notion-cache.json
 *.log
 npm-debug.log*
