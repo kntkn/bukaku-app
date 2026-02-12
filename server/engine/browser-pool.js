@@ -1,7 +1,7 @@
 /**
  * ブラウザプール管理
- * 全プラットフォームのブラウザを事前起動・ログイン状態を維持
- * セッション永続化対応
+ * ログイン時: ブラウザ起動→ログイン→セッション保存→ブラウザ閉じる（メモリ解放）
+ * 検索時: 必要なブラウザだけオンデマンドで起動（セッション復元）
  */
 
 const { chromium } = require('playwright');
@@ -26,13 +26,14 @@ const VIEWPORT_CONFIG = { width: 1920, height: 1080 };
 
 /**
  * ブラウザプールクラス
- * - 複数ブラウザを事前起動
- * - ログイン状態を維持
+ * - ログイン済みプラットフォームをSetで管理（メモリ軽量）
+ * - ブラウザはオンデマンド起動・使用後に閉じる
  * - セッションをファイルに永続化
  */
 class BrowserPool {
   constructor() {
     this.browsers = new Map();  // platformId → { browser, context, page, loggedIn }
+    this.loggedInPlatforms = new Set();  // ログイン済みプラットフォームID（ブラウザ閉じても維持）
     this.initialized = false;
     this.initializing = false;
   }
@@ -51,6 +52,13 @@ class BrowserPool {
    */
   getSessionPath(platformId) {
     return path.join(SESSION_DIR, `${platformId}.json`);
+  }
+
+  /**
+   * セッションファイルの存在チェック
+   */
+  hasSession(platformId) {
+    return fs.existsSync(this.getSessionPath(platformId));
   }
 
   /**
@@ -105,16 +113,17 @@ class BrowserPool {
         return route.continue();
       });
 
+      const loggedIn = this.loggedInPlatforms.has(platformId);
       this.browsers.set(platformId, {
         browser,
         context,
         page,
         platform,
-        loggedIn: false,
+        loggedIn,
         lastUsed: Date.now()
       });
 
-      console.log(`[BrowserPool] ${platformId}: ブラウザ起動完了（リソースブロック有効）`);
+      console.log(`[BrowserPool] ${platformId}: ブラウザ起動完了（loggedIn=${loggedIn}）`);
       return this.browsers.get(platformId);
 
     } catch (error) {
@@ -182,7 +191,7 @@ class BrowserPool {
   }
 
   /**
-   * ログイン実行 & セッション保存
+   * ログイン実行 & セッション保存 & ブラウザ閉じてメモリ解放
    */
   async login(platformId, performLoginFn) {
     const entry = await this.getBrowser(platformId);
@@ -190,6 +199,8 @@ class BrowserPool {
 
     if (entry.loggedIn) {
       console.log(`[BrowserPool] ${platformId}: 既にログイン済み`);
+      // ログイン済みならブラウザを閉じてメモリ解放
+      await this._closeBrowserKeepStatus(platformId);
       return true;
     }
 
@@ -201,8 +212,6 @@ class BrowserPool {
       await page.waitForTimeout(2000);
 
       // 既にログイン済みかチェック
-      // 注意: loginUrlと同じURL（or loginを含むURL）にいる場合のみログイン実行
-      // セッション復元で別ページにリダイレクトされた場合はスキップ
       const currentUrl = page.url();
       const loginUrl = platform.loginUrl;
       const isStillOnLoginPage = currentUrl === loginUrl ||
@@ -212,6 +221,9 @@ class BrowserPool {
       if (!isStillOnLoginPage) {
         console.log(`[BrowserPool] ${platformId}: セッション有効、ログイン不要 (${currentUrl})`);
         entry.loggedIn = true;
+        this.loggedInPlatforms.add(platformId);
+        // セッション再保存してブラウザ閉じる
+        await this._saveSessionAndClose(platformId);
         return true;
       }
 
@@ -221,27 +233,60 @@ class BrowserPool {
 
       if (success) {
         entry.loggedIn = true;
-
-        // セッションを保存
-        try {
-          const storageState = await entry.context.storageState();
-          fs.writeFileSync(this.getSessionPath(platformId), JSON.stringify(storageState, null, 2));
-          console.log(`[BrowserPool] ${platformId}: セッション保存完了`);
-        } catch (e) {
-          console.log(`[BrowserPool] ${platformId}: セッション保存失敗 - ${e.message}`);
-        }
+        this.loggedInPlatforms.add(platformId);
+        // セッション保存してブラウザ閉じる（メモリ解放）
+        await this._saveSessionAndClose(platformId);
+      } else {
+        // 失敗時もブラウザ閉じる
+        await this._closeBrowserKeepStatus(platformId);
       }
 
       return success;
 
     } catch (error) {
       console.error(`[BrowserPool] ${platformId}: ログインエラー - ${error.message}`);
+      // エラー時もブラウザ閉じる
+      await this._closeBrowserKeepStatus(platformId);
       return false;
     }
   }
 
   /**
-   * 検索実行
+   * セッション保存してブラウザを閉じる（メモリ解放）
+   */
+  async _saveSessionAndClose(platformId) {
+    const entry = this.browsers.get(platformId);
+    if (!entry) return;
+
+    try {
+      const storageState = await entry.context.storageState();
+      fs.writeFileSync(this.getSessionPath(platformId), JSON.stringify(storageState, null, 2));
+      console.log(`[BrowserPool] ${platformId}: セッション保存完了`);
+    } catch (e) {
+      console.log(`[BrowserPool] ${platformId}: セッション保存失敗 - ${e.message}`);
+    }
+
+    try {
+      await entry.browser.close();
+    } catch (e) {}
+    this.browsers.delete(platformId);
+    console.log(`[BrowserPool] ${platformId}: ブラウザ閉じてメモリ解放`);
+  }
+
+  /**
+   * ブラウザを閉じるがloggedInPlatformsは維持
+   */
+  async _closeBrowserKeepStatus(platformId) {
+    const entry = this.browsers.get(platformId);
+    if (!entry) return;
+    try {
+      await entry.browser.close();
+    } catch (e) {}
+    this.browsers.delete(platformId);
+  }
+
+  /**
+   * 検索実行（ブラウザをオンデマンド起動、検索後は維持）
    */
   async search(platformId, propertyName, roomNumber, performSearchFn, options = {}) {
     const entry = await this.getBrowser(platformId);
@@ -249,8 +294,13 @@ class BrowserPool {
       return { found: false, error: `Browser not available for ${platformId}` };
     }
 
-    if (!entry.loggedIn) {
+    if (!entry.loggedIn && !this.loggedInPlatforms.has(platformId)) {
       return { found: false, error: `Not logged in to ${platformId}` };
+    }
+
+    // loggedInPlatformsにあるがentryのフラグが立ってない場合は更新
+    if (!entry.loggedIn && this.loggedInPlatforms.has(platformId)) {
+      entry.loggedIn = true;
     }
 
     const { page } = entry;
@@ -303,22 +353,22 @@ class BrowserPool {
 
   /**
    * マルチタブ並列検索（同一プラットフォームで複数物件を同時検索）
-   * @param {string} platformId - プラットフォームID
-   * @param {Array} properties - 物件リスト [{property_name, room_number}, ...]
-   * @param {Function} performSearchFn - 検索実行関数
-   * @param {Object} options - オプション
-   * @returns {Array} 検索結果配列
    */
   async searchMultipleParallel(platformId, properties, performSearchFn, options = {}) {
     const { onStep = () => {}, onResult = () => {}, maxTabs = 8 } = options;
     const entry = await this.getBrowser(platformId);
 
-    if (!entry || !entry.loggedIn) {
+    if (!entry || (!entry.loggedIn && !this.loggedInPlatforms.has(platformId))) {
       return properties.map(p => ({
         property: p,
         found: false,
         error: `Not logged in to ${platformId}`
       }));
+    }
+
+    // loggedInフラグを同期
+    if (!entry.loggedIn && this.loggedInPlatforms.has(platformId)) {
+      entry.loggedIn = true;
     }
 
     const { context, platform } = entry;
@@ -397,13 +447,11 @@ class BrowserPool {
 
       const chunkResults = await Promise.all(searchPromises);
 
-      // 結果を通知（各検索完了時にonStepも呼ぶ）
+      // 結果を通知
       for (let idx = 0; idx < chunkResults.length; idx++) {
         const result = chunkResults[idx];
-        const overallIndex = chunkIndex * pages.length + idx;
         results.push(result);
 
-        // ステップ進捗を通知
         onStep({
           platformId,
           message: `${result.property?.property_name || '物件'}の検索${result.found ? 'ヒット' : '完了'}`,
@@ -461,34 +509,46 @@ class BrowserPool {
   }
 
   /**
-   * アクティブなブラウザ数
+   * アクティブなブラウザ数（実際に開いているブラウザ）
    */
   get activeCount() {
     return this.browsers.size;
   }
 
   /**
-   * ログイン済みブラウザ数
+   * ログイン済みプラットフォーム数（ブラウザの有無に関係なく）
    */
   get loggedInCount() {
-    let count = 0;
-    for (const entry of this.browsers.values()) {
-      if (entry.loggedIn) count++;
-    }
-    return count;
+    return this.loggedInPlatforms.size;
   }
 
   /**
-   * ステータス取得
+   * ステータス取得（ログイン済みプラットフォームはブラウザ閉じても表示）
    */
   getStatus() {
     const status = {};
-    for (const [platformId, entry] of this.browsers) {
+
+    // ログイン済みプラットフォーム（ブラウザ開いてなくても表示）
+    for (const platformId of this.loggedInPlatforms) {
+      const entry = this.browsers.get(platformId);
       status[platformId] = {
-        loggedIn: entry.loggedIn,
-        lastUsed: entry.lastUsed
+        loggedIn: true,
+        lastUsed: entry?.lastUsed || Date.now(),
+        browserActive: !!entry
       };
     }
+
+    // 開いているがログインしていないブラウザ
+    for (const [platformId, entry] of this.browsers) {
+      if (!status[platformId]) {
+        status[platformId] = {
+          loggedIn: entry.loggedIn,
+          lastUsed: entry.lastUsed,
+          browserActive: true
+        };
+      }
+    }
+
     return {
       active: this.activeCount,
       loggedIn: this.loggedInCount,
