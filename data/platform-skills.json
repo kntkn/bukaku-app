@@ -1,32 +1,47 @@
 {
   "itandi": {
     "name": "ITANDI BB",
-    "comment": "itandibb.com/topにアクセス→未ログインならitandi-accounts.comにリダイレクト",
+    "comment": "itandibb.com/topにアクセス→未ログインならitandi-accounts.comにリダイレクト。たまにトップページに戻されることがあり、その場合はページ上部のログインボタンから進む",
     "login": {
       "steps": [
-        { "action": "waitFor", "selector": "input#email", "timeout": 5000 },
-        { "action": "fill", "selector": "input#email", "value": "${email}" },
-        { "action": "fill", "selector": "input#password", "value": "${password}" },
-        { "action": "click", "selector": "input[type='submit']" },
-        { "action": "smartWait", "selector": "text=リスト検索", "timeout": 5000 }
+        { "action": "waitFor", "selector": "input#email, input[placeholder*='example@itandi.co.jp']", "timeout": 10000 },
+        { "action": "fill", "selector": "input#email, input[placeholder*='example@itandi.co.jp']", "value": "${email}" },
+        { "action": "fill", "selector": "input#password, input[type='password']", "value": "${password}" },
+        { "action": "click", "selector": "input[type='submit'], button:has-text('ログイン')" },
+        { "action": "smartWait", "selector": "text=リスト検索", "timeout": 10000 }
       ],
-      "successCheck": { "urlContains": "itandibb.com", "urlNotContains": ["login", "itandi-accounts"] }
+      "retryLogin": {
+        "comment": "トップページに戻された場合、上部のログインボタンをクリックしてログインフローを再開",
+        "trigger": { "urlContains": "itandibb.com/top" },
+        "steps": [
+          { "action": "click", "selector": "a:has-text('ログイン'), a[href*='login'], button:has-text('ログイン')" },
+          { "action": "smartWait", "selector": "input#email, input[placeholder*='example@itandi.co.jp']", "timeout": 10000 },
+          { "action": "fill", "selector": "input#email, input[placeholder*='example@itandi.co.jp']", "value": "${email}" },
+          { "action": "fill", "selector": "input#password, input[type='password']", "value": "${password}" },
+          { "action": "click", "selector": "input[type='submit'], button:has-text('ログイン')" },
+          { "action": "smartWait", "selector": "text=リスト検索", "timeout": 10000 }
+        ]
+      },
+      "afterLoginCheck": { "action": "goto", "url": "https://itandibb.com/top", "wait": 2000 },
+      "successCheck": { "urlContains": "itandibb.com", "urlNotContains": ["login", "itandi-accounts"], "elementExists": "text=リスト検索" }
     },
     "search": {
       "preSteps": [
-        { "action": "waitFor", "selector": "text=リスト検索", "timeout": 5000 },
+        { "action": "goto", "url": "https://itandibb.com/top" },
+        { "action": "smartWait", "selector": "text=リスト検索", "timeout": 10000 },
         { "action": "click", "selector": "text=リスト検索", "index": 0 },
-        { "action": "smartWait", "selector": "input[name='building_name:match']", "timeout": 5000 }
+        { "action": "smartWait", "selector": "input[name='building_name:match']", "timeout": 10000 }
       ],
       "steps": [
-        { "action": "fill", "selector": "input[name='building_name:match']", "value": "${propertyName}" },
+        { "action": "fill", "selector": "input[name='building_name:match']", "value": "${propertyName}", "timeout": 10000 },
         { "action": "click", "selector": "button[type='submit']" },
-        { "action": "smartWait", "selector": ".itandi-bb-ui__Box", "timeout": 5000 }
+        { "action": "wait", "ms": 2000 },
+        { "action": "smartWait", "selector": "[class*='ListResultArea']", "timeout": 5000 }
       ],
       "roomNumberSteps": [
         { "action": "fill", "selector": "input[name='room_number:match'], input[name='room_no'], input[placeholder*='部屋'], input[placeholder*='号室']", "value": "${roomNumber}", "optional": true }
       ],
-      "resultSelector": ".itandi-bb-ui__Box.css-1tqsbsd",
+      "resultSelector": "[class*='ListResultArea']",
       "resultExtraction": {
         "statusPatterns": {
           "available": ["募集中"],
@@ -34,7 +49,7 @@
           "unavailable": ["成約済", "募集終了"]
         },
         "adPatterns": ["広告費", "AD"],
-        "adSelector": ".itandi-bb-ui__Flex.css-yj0ebl > span:first-child",
+        "adSelector": ".itandi-bb-ui__Flex > span:first-child",
         "adComment": "部屋行の最終カラム内、最初のspan=AD値（なし/100%等）",
         "viewingPatterns": ["内見可", "即内見"],
         "applicationBadgeSelector": "[class*='MuiBadge-badge']"
@@ -56,7 +71,8 @@
     },
     "search": {
       "preSteps": [
-        { "action": "waitFor", "selector": "input#renm", "timeout": 5000 }
+        { "action": "goto", "url": "https://bb.ielove.jp/ielovebb/top/index/type/01/" },
+        { "action": "smartWait", "selector": "input#renm", "timeout": 5000 }
       ],
       "steps": [
         { "action": "fill", "selector": "input#renm", "value": "${propertyName}" },
@@ -79,8 +95,7 @@
   },
   "atbb": {
     "name": "ATBB",
-    "comment": "複雑なポータル構造。物件検索画面への遷移に追加調査が必要",
-    "complexNavigation": true,
+    "comment": "ポータル(members.athome.jp)→フォームPOST(target=_self)→ATBB SSO→ConcurrentLogin強制解除→検索ページ。searchareaはdisplay:noneで隠れているためevaluateで表示。フリーワード検索(freeWordSearchSubject)で物件名検索",
     "login": {
       "steps": [
         { "action": "waitFor", "selector": "input#loginFormText", "timeout": 5000 },
@@ -92,35 +107,62 @@
       "successCheck": { "urlContains": "portal" }
     },
     "search": {
-      "comment": "ポータルからの物件検索ナビゲーションが複雑。追加調査が必要",
-      "requiresManualNavigation": true
+      "alwaysRunPreSteps": true,
+      "preSteps": [
+        { "action": "goto", "url": "https://members.athome.jp/portal" },
+        { "action": "smartWait", "selector": "form[method='post']", "timeout": 10000 },
+        { "action": "evaluate", "script": "const f=document.querySelector('form[method=\"post\"]');if(f){f.action='/atbb/nyushuSearch?from=global_menu_bukkenKensaku';f.target='_self';f.submit()}", "waitForNavigation": true, "timeout": 30000 },
+        { "action": "wait", "ms": 3000 },
+        { "action": "evaluate", "script": "if(document.body.textContent.includes('他のユーザー'))document.forms[0].submit()", "optional": true },
+        { "action": "smartWait", "selector": "input[name='atbbShumokuDaibunrui']", "timeout": 15000 },
+        { "action": "evaluate", "script": "var r=document.querySelector('input[name=\"atbbShumokuDaibunrui\"][value=\"06\"]');if(r){r.checked=true;r.click()}var a=document.getElementById('searcharea');if(a)a.style.display=''" },
+        { "action": "wait", "ms": 500 },
+        { "action": "smartWait", "selector": "input#freeWordSearchSubject", "timeout": 5000 }
+      ],
+      "steps": [
+        { "action": "fill", "selector": "input#freeWordSearchSubject", "value": "${propertyName}" },
+        { "action": "click", "selector": "input#freeWordSearchSubjectButton" },
+        { "action": "smartWait", "selector": ".property_card", "timeout": 15000 }
+      ],
+      "resultSelector": ".property_card",
+      "resultExtraction": {
+        "statusPatterns": {
+          "available": ["募集中", "空室", "入居可", "空き"],
+          "applied": ["申込中", "申込あり", "商談中"],
+          "unavailable": ["成約済", "成約", "終了", "募集終了"]
+        },
+        "adPatterns": ["AD", "広告料", "広告費", "広告転載"],
+        "adSelector": ".property_data",
+        "adComment": "物件名=p.name, 賃料=画像化(txt2img), 広告転載=property_data内, 転載不可/可",
+        "viewingPatterns": ["内見可", "内覧可"]
+      }
     }
   },
   "essquare": {
     "name": "いい物件",
-    "comment": "React/MUI SPA。OAuth経由でes-account.comにリダイレクト後、es-square.netに戻る",
+    "comment": "React/MUI SPA。OAuth経由でes-account.comにリダイレクト。キーワード/建物名検索機能なし（エリア/沿線/地図ベースの検索のみ）。物件名での検索は不可のためSKIPPED",
     "complexNavigation": true,
     "login": {
       "steps": [
         { "action": "waitFor", "selector": "button:has-text('いい生活アカウントでログイン')", "timeout": 5000 },
         { "action": "click", "selector": "button:has-text('いい生活アカウントでログイン')" },
         { "action": "smartWait", "selector": "input#username", "timeout": 5000 },
-        { "action": "fill", "selector": "input#username", "value": "${email}" },
-        { "action": "fill", "selector": "input#password", "value": "${password}" },
-        { "action": "click", "selector": "button[name='action']" },
+        { "action": "fill", "selector": "input#username", "value": "${email}", "optional": true },
+        { "action": "fill", "selector": "input#password", "value": "${password}", "optional": true },
+        { "action": "click", "selector": "button[name='action']", "optional": true },
         { "action": "smartWait", "timeout": 5000 },
         { "action": "goto", "url": "https://rent.es-square.net/" }
       ],
       "successCheck": { "urlNotContains": ["login", "es-account.com"] }
     },
     "search": {
-      "comment": "MUIベースのSPA。検索入力のセレクタが動的。追加調査が必要",
+      "comment": "建物名/フリーワード検索機能なし。エリア/沿線/地図検索のみのため、物件名ベースの物確に対応不可",
       "requiresManualNavigation": true
     }
   },
   "ambition": {
     "name": "アンビション",
-    "comment": "goweb.work framework - /rentals/searchで建物名検索",
+    "comment": "goweb.work framework - keywordフィールドで建物名検索",
     "login": {
       "steps": [
         { "action": "waitFor", "selector": "input#AccountLoginid", "timeout": 5000 },
@@ -134,14 +176,14 @@
     "search": {
       "preSteps": [
         { "action": "goto", "url": "https://ab.100kadou.net/rentals/search" },
-        { "action": "smartWait", "selector": "input#SearchBuildingName", "timeout": 5000 }
+        { "action": "smartWait", "selector": "input#SearchKeyword", "timeout": 5000 }
       ],
       "steps": [
-        { "action": "fill", "selector": "input#SearchBuildingName", "value": "${propertyName}" },
-        { "action": "click", "selector": "input[type='submit'][value='検索'], form input[type='submit']" },
-        { "action": "smartWait", "selector": "table.table tbody tr", "timeout": 5000 }
+        { "action": "fill", "selector": "input#SearchKeyword", "value": "${propertyName}" },
+        { "action": "click", "selector": "input[type='submit'][value='検索']" },
+        { "action": "smartWait", "selector": "table.row.js-room", "timeout": 5000 }
       ],
-      "resultSelector": "table.table tbody tr, .rental-list tr, .property-item",
+      "resultSelector": "table.row.js-room",
       "resultExtraction": {
         "statusPatterns": {
           "available": ["募集中", "空室", "入居可"],
@@ -157,7 +199,7 @@
   },
   "shimadahouse": {
     "name": "シマダハウス",
-    "comment": "goweb.work framework - /rentals/searchで建物名検索",
+    "comment": "goweb.work framework - keywordフィールドで建物名検索",
     "login": {
       "steps": [
         { "action": "waitFor", "selector": "input#AccountLoginid", "timeout": 5000 },
@@ -171,14 +213,15 @@
     "search": {
       "preSteps": [
         { "action": "goto", "url": "https://shimadahouse.goweb.work/rentals/search" },
-        { "action": "smartWait", "selector": "input#SearchBuildingName", "timeout": 5000 }
+        { "action": "smartWait", "selector": "input#SearchKeyword, input#SearchBuildingName", "timeout": 5000 }
       ],
       "steps": [
-        { "action": "fill", "selector": "input#SearchBuildingName", "value": "${propertyName}" },
+        { "action": "fill", "selector": "input#SearchKeyword, input#SearchBuildingName", "value": "${propertyName}" },
         { "action": "click", "selector": "input[type='submit'][value='検索'], form input[type='submit']" },
-        { "action": "smartWait", "selector": "table.table tbody tr", "timeout": 5000 }
+        { "action": "waitForLoad" },
+        { "action": "smartWait", "selector": "table.row.js-room, table.table tbody tr, .search-result", "timeout": 10000 }
       ],
-      "resultSelector": "table.table tbody tr, .rental-list tr, .property-item",
+      "resultSelector": "table.row.js-room, table.table tbody tr",
       "resultExtraction": {
         "statusPatterns": {
           "available": ["募集中", "空室", "入居可"],
@@ -244,7 +287,8 @@
     },
     "search": {
       "preSteps": [
-        { "action": "waitFor", "selector": "input#address_name", "timeout": 5000 }
+        { "action": "goto", "url": "https://goodworks-tokyo.bukkaku.jp/agent/search/by_area" },
+        { "action": "smartWait", "selector": "input#address_name", "timeout": 5000 }
       ],
       "steps": [
         { "action": "fill", "selector": "input#address_name", "value": "${propertyName}" },
@@ -280,7 +324,8 @@
     },
     "search": {
       "preSteps": [
-        { "action": "waitFor", "selector": "input#address_name", "timeout": 5000 }
+        { "action": "goto", "url": "https://joint-property.bukkaku.jp/agent/search/by_area" },
+        { "action": "smartWait", "selector": "input#address_name", "timeout": 5000 }
       ],
       "steps": [
         { "action": "fill", "selector": "input#address_name", "value": "${propertyName}" },
@@ -303,8 +348,7 @@
   },
   "seiwa": {
     "name": "セイワ",
-    "comment": "ログイン後物件一覧ページに遷移。検索ボタンがdisplay:noneで非表示、ポップアップモーダル表示あり。追加調査が必要",
-    "complexNavigation": true,
+    "comment": "ASP.NET MVC。ログイン後PropertyInformationに遷移。検索ボタンdisplay:noneのためEnterで送信",
     "login": {
       "steps": [
         { "action": "waitFor", "selector": "input#LoginId", "timeout": 5000 },
@@ -316,8 +360,27 @@
       "successCheck": { "urlContains": "PropertyInformation" }
     },
     "search": {
-      "comment": "検索ボタンがCSS非表示。ライブフィルター形式の可能性あり。追加調査が必要",
-      "requiresManualNavigation": true
+      "preSteps": [
+        { "action": "goto", "url": "https://new-seiwa-dss.net/j-search/Main/PropertyInformation" },
+        { "action": "smartWait", "selector": "input#SearchConditions_Freeword_PropertyName", "timeout": 8000 }
+      ],
+      "steps": [
+        { "action": "fill", "selector": "input#SearchConditions_Freeword_PropertyName", "value": "${propertyName}" },
+        { "action": "evaluate", "script": "document.getElementById('btnSearch').click()", "waitForNavigation": true, "timeout": 15000 },
+        { "action": "smartWait", "selector": ".b-bukken--item", "timeout": 15000 }
+      ],
+      "resultSelector": ".b-bukken--item",
+      "resultExtraction": {
+        "statusPatterns": {
+          "available": ["募集中", "空室", "空き予定"],
+          "applied": ["申込中", "申込あり", "商談中"],
+          "unavailable": ["成約済", "成約", "終了", "改装中"]
+        },
+        "adPatterns": ["広告料", "AD"],
+        "adSelector": null,
+        "adComment": "物件名=h3, 部屋テーブル=b-bukken--table-newPC, 広告料列あり, 内見列あり（可/不可）",
+        "viewingPatterns": ["内見可", "内覧可", "内見"]
+      }
     }
   },
   "kintarou": {
@@ -359,8 +422,7 @@
   },
   "daitoservice": {
     "name": "大東建託",
-    "comment": "ログイン後サービスポータルに遷移。物件検索カードをクリック後モーダルが表示される。追加調査が必要",
-    "complexNavigation": true,
+    "comment": "Vue SPA。ログイン後broker/topに遷移。初回はモーダル表示あり→close-buttonでforce close。検索は物件名入力→ボタンクリックで/search/resultに遷移",
     "login": {
       "steps": [
         { "action": "waitFor", "selector": "input#member_id", "timeout": 5000 },
@@ -373,8 +435,30 @@
       "successCheck": { "urlContains": "service" }
     },
     "search": {
-      "comment": "物件検索カードクリック後の遷移フローが複雑。追加調査が必要",
-      "requiresManualNavigation": true
+      "preSteps": [
+        { "action": "goto", "url": "https://front.dk-portal.jp/broker/top" },
+        { "action": "wait", "ms": 2000 },
+        { "action": "click", "selector": ".app-dialog__close-button", "force": true, "optional": true },
+        { "action": "wait", "ms": 500 },
+        { "action": "smartWait", "selector": "input[placeholder*='居住用の物件名']", "timeout": 5000 }
+      ],
+      "steps": [
+        { "action": "fill", "selector": "input[placeholder*='居住用の物件名']", "value": "${propertyName}" },
+        { "action": "click", "selector": "button.search__button" },
+        { "action": "smartWait", "selector": ".search-result-wrap", "timeout": 10000 }
+      ],
+      "resultSelector": ".search-result-wrap > .search-result",
+      "resultExtraction": {
+        "statusPatterns": {
+          "available": ["募集中", "空室", "即入居"],
+          "applied": ["申込中", "申込あり", "商談中"],
+          "unavailable": ["成約済", "成約", "終了"]
+        },
+        "adPatterns": ["AD", "広告料", "広告費"],
+        "adSelector": null,
+        "adComment": "物件カード=table.search-result__table。ヘッダーに広告料列あり。room-list行のtdから取得。注:カラムヘッダー「入居可能日」があるため「入居可」パターンは使用不可",
+        "viewingPatterns": ["内見可", "内覧可"]
+      }
     }
   },
   "able_hosho": {
@@ -392,7 +476,8 @@
     },
     "search": {
       "preSteps": [
-        { "action": "waitFor", "selector": "input[name='building_name']", "timeout": 5000 }
+        { "action": "goto", "url": "https://heya.a-hosho.co.jp/search.php" },
+        { "action": "smartWait", "selector": "input[name='building_name']", "timeout": 5000 }
       ],
       "steps": [
         { "action": "fill", "selector": "input[name='building_name']", "value": "${propertyName}" },
@@ -447,7 +532,8 @@
     },
     "search": {
       "preSteps": [
-        { "action": "waitFor", "selector": "text=本社", "timeout": 5000 },
+        { "action": "goto", "url": "http://www.tanaka-dk.jp/store/siten_select.php" },
+        { "action": "smartWait", "selector": "text=本社", "timeout": 5000 },
         { "action": "click", "selector": "text=本社" },
         { "action": "smartWait", "selector": "input[name='search_article_name']", "timeout": 5000 }
       ],

@@ -33,3 +33,8 @@ data/notion-cache.json
 *credentials*
 *secrets*
 .vercel
+
+# E2E test data (sensitive property info)
+e2e/data/downloads/
+e2e/data/results/
+e2e/data/screenshots/

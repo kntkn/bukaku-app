@@ -17,6 +17,15 @@ try {
   console.warn('[browser-pool] credentials.json not found or invalid, using empty defaults:', e.message);
 }
 
+// プラットフォームスキル定義
+const skillsPath = path.join(__dirname, '../../data/platform-skills.json');
+let platformSkills = {};
+try {
+  platformSkills = JSON.parse(fs.readFileSync(skillsPath, 'utf-8'));
+} catch (e) {
+  console.warn('[browser-pool] platform-skills.json not found:', e.message);
+}
+
 // セッション保存ディレクトリ
 const SESSION_DIR = path.join(__dirname, '../../data/sessions');
 
@@ -193,37 +202,75 @@ class BrowserPool {
   /**
    * ログイン実行 & セッション保存 & ブラウザ閉じてメモリ解放
    */
-  async login(platformId, performLoginFn) {
+  /**
+   * @param {Object} options - { keepAlive: true でブラウザを閉じずに維持 }
+   */
+  async login(platformId, performLoginFn, options = {}) {
+    const { keepAlive = false } = options;
     const entry = await this.getBrowser(platformId);
     if (!entry) return false;
 
     if (entry.loggedIn) {
       console.log(`[BrowserPool] ${platformId}: 既にログイン済み`);
-      // ログイン済みならブラウザを閉じてメモリ解放
-      await this._closeBrowserKeepStatus(platformId);
+      if (!keepAlive) await this._closeBrowserKeepStatus(platformId);
       return true;
     }
 
     const { page, platform } = entry;
 
     try {
-      // ログインページへ（domcontentloadedで十分。networkidleだとRailway環境でタイムアウトしやすい）
-      await page.goto(platform.loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await page.waitForTimeout(2000);
+      // ログインページへ
+      await page.goto(platform.loginUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(500);
 
       // 既にログイン済みかチェック
       const currentUrl = page.url();
       const loginUrl = platform.loginUrl;
-      const isStillOnLoginPage = currentUrl === loginUrl ||
-        currentUrl.includes('login') || currentUrl.includes('signin') || currentUrl.includes('auth') ||
-        currentUrl.replace(/\/$/, '') === loginUrl.replace(/\/$/, '');
+      const skills = platformSkills[platformId];
+      const successCheck = skills?.login?.successCheck;
 
-      if (!isStillOnLoginPage) {
+      let isLoggedIn = false;
+
+      if (successCheck) {
+        const urlOk = successCheck.urlContains ? currentUrl.includes(successCheck.urlContains) : true;
+        const urlNotBad = successCheck.urlNotContains
+          ? !successCheck.urlNotContains.some(s => currentUrl.includes(s))
+          : true;
+        isLoggedIn = urlOk && urlNotBad;
+        if (isLoggedIn && successCheck.elementExists) {
+          const el = await page.$(successCheck.elementExists).catch(() => null);
+          isLoggedIn = !!el;
+          if (!isLoggedIn) {
+            console.log(`[BrowserPool] ${platformId}: URL OK だがログイン要素が未検出 (${successCheck.elementExists})`);
+          }
+        }
+        if (isLoggedIn) {
+          console.log(`[BrowserPool] ${platformId}: successCheckでログイン済み確認 (${currentUrl})`);
+        }
+      }
+
+      if (!isLoggedIn) {
+        const isStillOnLoginPage = (currentUrl.includes('login') || currentUrl.includes('signin') || currentUrl.includes('auth'))
+          && currentUrl !== loginUrl;
+        if (!isStillOnLoginPage) {
+          const loginSteps = skills?.login?.steps || [];
+          const firstWaitFor = loginSteps.find(s => s.action === 'waitFor');
+          if (firstWaitFor) {
+            const formExists = await page.$(firstWaitFor.selector).catch(() => null);
+            isLoggedIn = !formExists;
+          } else {
+            isLoggedIn = true;
+          }
+        }
+      }
+
+      if (isLoggedIn) {
         console.log(`[BrowserPool] ${platformId}: セッション有効、ログイン不要 (${currentUrl})`);
         entry.loggedIn = true;
         this.loggedInPlatforms.add(platformId);
-        // セッション再保存してブラウザ閉じる
-        await this._saveSessionAndClose(platformId);
+        await this._saveSession(platformId);
+        if (!keepAlive) await this._closeBrowserKeepStatus(platformId);
         return true;
       }
 
@@ -234,10 +281,9 @@ class BrowserPool {
       if (success) {
         entry.loggedIn = true;
         this.loggedInPlatforms.add(platformId);
-        // セッション保存してブラウザ閉じる（メモリ解放）
-        await this._saveSessionAndClose(platformId);
+        await this._saveSession(platformId);
+        if (!keepAlive) await this._closeBrowserKeepStatus(platformId);
       } else {
-        // 失敗時もブラウザ閉じる
         await this._closeBrowserKeepStatus(platformId);
       }
 
@@ -245,16 +291,15 @@ class BrowserPool {
 
     } catch (error) {
       console.error(`[BrowserPool] ${platformId}: ログインエラー - ${error.message}`);
-      // エラー時もブラウザ閉じる
       await this._closeBrowserKeepStatus(platformId);
       return false;
     }
   }
 
   /**
-   * セッション保存してブラウザを閉じる（メモリ解放）
+   * セッション保存のみ（ブラウザは閉じない）
    */
-  async _saveSessionAndClose(platformId) {
+  async _saveSession(platformId) {
     const entry = this.browsers.get(platformId);
     if (!entry) return;
 
@@ -265,9 +310,16 @@ class BrowserPool {
     } catch (e) {
       console.log(`[BrowserPool] ${platformId}: セッション保存失敗 - ${e.message}`);
     }
+  }
 
+  /**
+   * セッション保存してブラウザを閉じる（メモリ解放）
+   */
+  async _saveSessionAndClose(platformId) {
+    await this._saveSession(platformId);
     try {
-      await entry.browser.close();
+      const entry = this.browsers.get(platformId);
+      if (entry) await entry.browser.close();
     } catch (e) {}
     this.browsers.delete(platformId);
     console.log(`[BrowserPool] ${platformId}: ブラウザ閉じてメモリ解放`);
@@ -280,7 +332,8 @@ class BrowserPool {
     const entry = this.browsers.get(platformId);
     if (!entry) return;
     try {
-      await entry.browser.close();
+      const timeout = new Promise(resolve => setTimeout(resolve, 5000));
+      await Promise.race([entry.browser.close().catch(() => {}), timeout]);
     } catch (e) {}
     this.browsers.delete(platformId);
   }
@@ -303,10 +356,21 @@ class BrowserPool {
       entry.loggedIn = true;
     }
 
-    const { page } = entry;
+    const { page, platform } = entry;
     const { skipPreSteps = false, onStep = () => {} } = options;
 
     try {
+      // ブラウザ再起動後はabout:blankなのでプラットフォームURLに遷移
+      const currentUrl = page.url();
+      if (currentUrl === 'about:blank' || currentUrl === '') {
+        const targetUrl = platform?.loginUrl || credentials.platforms[platformId]?.loginUrl;
+        if (targetUrl) {
+          console.log(`[BrowserPool] ${platformId}: 検索前にナビゲーション → ${targetUrl}`);
+          await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await page.waitForTimeout(2000);
+        }
+      }
+
       const result = await performSearchFn(page, platformId, propertyName, roomNumber, { skipPreSteps, onStep });
       return result;
     } catch (error) {
@@ -498,8 +562,9 @@ class BrowserPool {
     console.log(`[BrowserPool] ${this.browsers.size}個のブラウザを終了中...`);
     const closePromises = [];
     for (const [platformId, entry] of this.browsers) {
+      const timeout = new Promise(resolve => setTimeout(resolve, 5000));
       closePromises.push(
-        entry.browser.close().catch(() => {})
+        Promise.race([entry.browser.close().catch(() => {}), timeout])
       );
     }
     await Promise.all(closePromises);

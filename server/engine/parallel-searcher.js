@@ -110,24 +110,26 @@ async function executeStep(page, step, creds, propertyName, roomNumber = '') {
           const element = await page.$(selector);
           if (element) await element.fill(value);
         } else {
-          await page.fill(selector, value);
+          await page.fill(selector, value, { timeout: step.timeout || DEFAULT_TIMEOUT });
         }
         break;
 
       case 'click':
-        if (step.index !== undefined) {
+        if (step.optional) {
+          const el = await page.$(selector);
+          if (el) await el.click({ force: !!step.force });
+        } else if (step.index !== undefined) {
           const elements = await page.$$(selector);
           if (elements[step.index]) {
-            await elements[step.index].click();
+            await elements[step.index].click({ force: !!step.force });
           }
         } else {
-          await page.click(selector);
+          await page.click(selector, { timeout: step.timeout || DEFAULT_TIMEOUT, force: !!step.force });
         }
         break;
 
       case 'wait':
-        // 固定waitは最大1秒に制限（高速化）
-        await page.waitForTimeout(Math.min(step.ms || 500, 1000));
+        await page.waitForTimeout(step.ms || 500);
         break;
 
       case 'smartWait':
@@ -152,7 +154,11 @@ async function executeStep(page, step, creds, propertyName, roomNumber = '') {
         break;
 
       case 'pressKey':
-        await page.keyboard.press(step.key);
+        if (step.selector) {
+          await page.press(step.selector, step.key);
+        } else {
+          await page.keyboard.press(step.key);
+        }
         break;
 
       case 'waitForLoad':
@@ -160,6 +166,21 @@ async function executeStep(page, step, creds, propertyName, roomNumber = '') {
         await page.waitForLoadState('domcontentloaded', {
           timeout: DEFAULT_TIMEOUT
         }).catch(() => {});
+        break;
+
+      case 'evaluate':
+        // ページ上でJavaScriptを実行（モーダル閉じ等）
+        if (step.script) {
+          if (step.waitForNavigation) {
+            const navPromise = page.waitForNavigation({
+              timeout: step.timeout || DEFAULT_TIMEOUT
+            }).catch(() => null);
+            await page.evaluate(step.script);
+            await navPromise;
+          } else {
+            await page.evaluate(step.script);
+          }
+        }
         break;
     }
     return true;
@@ -189,9 +210,10 @@ async function executeSteps(page, steps, creds, propertyName, roomNumber = '') {
 /**
  * 成功判定を実行
  */
-function checkSuccess(pageUrl, successCheck) {
+async function checkSuccess(page, successCheck) {
   if (!successCheck) return true;
 
+  const pageUrl = page.url();
   let success = true;
 
   if (successCheck.urlContains) {
@@ -203,6 +225,12 @@ function checkSuccess(pageUrl, successCheck) {
       ? successCheck.urlNotContains
       : [successCheck.urlNotContains];
     success = success && notContains.every(s => !pageUrl.includes(s));
+  }
+
+  // ページ要素の存在チェック（ログイン済みの証拠）
+  if (success && successCheck.elementExists) {
+    const el = await page.$(successCheck.elementExists).catch(() => null);
+    success = !!el;
   }
 
   return success;
@@ -242,19 +270,20 @@ async function performLogin(page, platformId, platform) {
     }
   }
 
-  // リトライ条件をチェック（ログイン画面に戻された場合）
+  // リトライ条件をチェック（トップページに戻された場合など）
   if (skills.login.retryLogin) {
     const retry = skills.login.retryLogin;
-    const needsRetry = retry.condition.urlContains && page.url().includes(retry.condition.urlContains);
+    const trigger = retry.trigger || retry.condition || {};
+    const needsRetry = trigger.urlContains && page.url().includes(trigger.urlContains);
 
     if (needsRetry) {
-      console.log(`[${platformId}] Retry login required (redirected to login)...`);
+      console.log(`[${platformId}] Retry login: トップページのログインボタンから再試行...`);
       await executeSteps(page, retry.steps, creds, '');
     }
   }
 
   // 成功判定
-  const success = checkSuccess(page.url(), skills.login.successCheck);
+  const success = await checkSuccess(page, skills.login.successCheck);
   console.log(`[${platformId}] Login result: ${success ? 'SUCCESS' : 'FAILED'} - ${page.url()}`);
 
   return success;
@@ -269,9 +298,26 @@ async function performLogin(page, platformId, platform) {
  * @param {Object} options - オプション
  * @param {boolean} options.skipPreSteps - preStepsをスキップ（連続検索時）
  */
+/**
+ * 物件名から末尾の部屋番号パターンを除去
+ * "Duo Stage白金高輪605" → "Duo Stage白金高輪"
+ * "ガスタリア新御茶ノ水0701" → "ガスタリア新御茶ノ水"
+ */
+function cleanPropertyName(name) {
+  if (!name) return name;
+  return name.replace(/[\s　]*[\d０-９]{3,5}(?:号室|号)?$/, '').trim();
+}
+
 async function performSearch(page, platformId, propertyName, roomNumber = '', options = {}) {
   const { skipPreSteps = false, onStep = () => {} } = options;
   const skills = platformSkills[platformId];
+
+  // 物件名から末尾の部屋番号を除去（PARSE時に混入するケース対策）
+  const cleanedName = cleanPropertyName(propertyName);
+  if (cleanedName !== propertyName) {
+    console.log(`[${platformId}] Property name cleaned: "${propertyName}" → "${cleanedName}"`);
+    propertyName = cleanedName;
+  }
   const platform = credentials.platforms[platformId];
   const creds = platform?.credentials || {};
   const platformName = platform?.name || platformId;
@@ -302,14 +348,15 @@ async function performSearch(page, platformId, propertyName, roomNumber = '', op
   const searchTarget = roomNumber ? `${propertyName} (${roomNumber})` : propertyName;
   console.log(`[${platformId}] Executing search steps for: "${searchTarget}"`);
 
-  // preSteps（検索ページへの遷移など）- 連続検索時はスキップ
-  if (skills.search.preSteps && !skipPreSteps) {
+  // preSteps（検索ページへの遷移など）- 連続検索時はスキップ（alwaysRunPreSteps設定時は常に実行）
+  const effectiveSkipPreSteps = skipPreSteps && !skills.search.alwaysRunPreSteps;
+  if (skills.search.preSteps && !effectiveSkipPreSteps) {
     onStep({ platformId, message: `${platformName}の検索ページを開いています...` });
     await executeSteps(page, skills.search.preSteps, creds, propertyName, roomNumber);
   }
 
-  // 連続検索時は検索フォームをクリアしてから入力
-  if (skipPreSteps && skills.search.steps) {
+  // 連続検索時は検索フォームをクリアしてから入力（alwaysRunPreStepsの場合はpreStepsが実行されるのでスキップ）
+  if (effectiveSkipPreSteps && skills.search.steps) {
     onStep({ platformId, message: `検索フォームをクリア中...` });
     try {
       const inputSelector = skills.search.steps.find(s => s.action === 'fill')?.selector;
@@ -347,12 +394,13 @@ async function extractResults(page, platformId, propertyName, extraction) {
   // カスタム結果セレクタがある場合
   if (skills?.search?.resultSelector) {
     const cards = await page.$$(skills.search.resultSelector).catch(() => []);
+    console.log(`[${platformId}] resultSelector="${skills.search.resultSelector}" → ${cards.length} cards`);
     const results = [];
 
-    for (const card of cards.slice(0, 10)) {
+    for (const card of cards.slice(0, 50)) {
       const cardText = await card.textContent();
 
-      if (!cardText.includes(propertyName)) continue;
+      if (!normalizedIncludes(cardText, propertyName)) continue;
 
       // AD専用セレクタがあれば、そのセレクタのテキストを取得
       let adText = null;
@@ -390,11 +438,29 @@ async function extractResults(page, platformId, propertyName, extraction) {
       results.push(result);
     }
 
+    // セレクタがヒットしたがフィルタで0件 → 結果なし
+    // セレクタ自体がヒットしない（cards.length === 0） → 該当物件なし
+    // ※ generic extractionへのフォールバックは廃止（検索入力欄のテキストで偽陽性が発生するため）
+    if (results.length === 0 && cards.length === 0) {
+      console.log(`[${platformId}] resultSelector matched 0 elements, no results found`);
+    }
+
     return { found: results.length > 0, results };
   }
 
   // 汎用抽出
   return await extractGenericResults(page, propertyName, extraction);
+}
+
+/**
+ * 正規化した文字列包含チェック（全角/半角スペース除去、全角英数→半角）
+ */
+function normalizedIncludes(text, target) {
+  const normalize = (s) => s
+    .replace(/[\s\u3000]+/g, '')  // 全角/半角スペース・改行除去
+    .replace(/[Ａ-Ｚａ-ｚ０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)) // 全角英数→半角
+    .toLowerCase();
+  return normalize(text).includes(normalize(target));
 }
 
 /**
@@ -489,7 +555,7 @@ function extractResultInfo(text, extraction, adText = null) {
 async function extractGenericResults(page, propertyName, extraction) {
   const pageText = await page.textContent('body');
 
-  if (pageText.includes(propertyName)) {
+  if (normalizedIncludes(pageText, propertyName)) {
     const result = extractResultInfo(pageText, extraction);
     result.raw_text = pageText.substring(0, 500);
     return { found: true, results: [result] };
@@ -882,6 +948,7 @@ module.exports = {
   performLogin,
   performSearch,
   normalizeAdToMonths,
+  cleanPropertyName,
   credentials,
   platformSkills,
   reloadSkills
